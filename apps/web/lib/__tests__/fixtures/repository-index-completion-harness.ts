@@ -60,6 +60,12 @@ try {
         WHERE table_schema = ${schema} AND table_name = 'repositories' AND column_name = 'firstIndexedAt'
       `;
       assert.deepEqual(columns, [{ column_default: null, is_nullable: "YES", data_type: "timestamp without time zone" }]);
+      const guards = await readFile(new URL("../../../../../packages/db/prisma/migrations/20261014143000_index_completion_guards/migration.sql", import.meta.url), "utf8");
+      await tx.$executeRawUnsafe(guards);
+      assert.deepEqual(await tx.$queryRaw`SELECT id, "indexedAt", name FROM repositories ORDER BY id`, before);
+      assert.deepEqual(await tx.$queryRaw`SELECT "indexAttemptId", "localIndexUpload" FROM repositories`, [
+        { indexAttemptId: null, localIndexUpload: null }, { indexAttemptId: null, localIndexUpload: null },
+      ]);
       await tx.$executeRawUnsafe(`DROP SCHEMA "${schema}" CASCADE`);
     });
   } else if (scenario === "first" || scenario === "reindex" || scenario === "legacy") {
@@ -121,6 +127,21 @@ try {
     assert.equal(result.firstIndexedAt !== null, scenario === "background");
     assert.equal(result.indexedAt !== null, scenario === "background");
     if (scenario === "superseded") assert.equal(result.indexStatus, "pending");
+  } else if (scenario === "empty-then-content" || scenario === "failed-reindex") {
+    const emptyStats = { ...stats, indexedFiles: 0, totalChunks: 0, totalVectors: 0 };
+    await runRepositoryIndex(repo.id, async () => scenario === "empty-then-content" ? emptyStats : stats);
+    const first = await snapshot();
+    await prisma.repository.update({ where: { id: repo.id }, data: { indexStatus: "indexing" } });
+    if (scenario === "empty-then-content") {
+      assert.equal(first.firstIndexedAt, null);
+      assert.equal(first.indexedAt, null);
+      await runRepositoryIndex(repo.id, async () => stats);
+      assert.ok((await snapshot()).firstIndexedAt);
+    } else {
+      await assert.rejects(() => runRepositoryIndex(repo.id, async () => { throw new Error("Read failed"); }), /Read failed/);
+      assert.deepEqual((await snapshot()).firstIndexedAt, first.firstIndexedAt);
+      assert.deepEqual((await snapshot()).indexedAt, first.indexedAt);
+    }
   } else if (scenario === "replacement") {
     let finish!: () => void;
     let began!: () => void;

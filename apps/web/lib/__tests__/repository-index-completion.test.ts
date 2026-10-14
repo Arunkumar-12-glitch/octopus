@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 const enabled = process.env.RUN_FIRST_INDEX_DB_TESTS === "1";
 const cases = [
   "first", "reindex", "legacy", "concurrent-earlier-first", "concurrent-later-first",
-  "migration", "failed", "cancelled", "background", "late-cancel", "empty", "superseded", "replacement",
+  "migration", "failed", "cancelled", "background", "late-cancel", "empty", "superseded", "replacement", "empty-then-content", "failed-reindex",
   "local-single", "local-verified", "local-legacy", "local-nonfinal", "local-gap", "local-duplicate", "local-wrong-session", "local-cancel",
   "timezone-utc", "timezone-berlin",
 ] as const;
