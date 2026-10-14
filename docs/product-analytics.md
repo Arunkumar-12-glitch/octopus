@@ -82,6 +82,14 @@ data until a full replacement completes; there is no backfill.
 Incremental updates bind the stable active generation, so
 metadata edits and other merges do not invalidate their writes or failure cleanup.
 Previous and abandoned generations remain stored; this change adds no cleanup job.
+Generated indexes also use a generation-qualified storage repository key, while
+search results retain the logical repository ID. Pre-generation binaries only
+read and delete the legacy key, so an old worker cannot expose staged chunks or
+erase a new index during a rolling upgrade. Older binaries cannot read the new
+generations: rollback requires draining generation-aware writers, clearing the
+active-generation pointers and marking indexes stale for reindexing, while
+preserving `firstIndexedAt`. A binary downgrade alone does not restore fresh
+index coverage, especially for repositories with no legacy index.
 Queue timeouts persist as failures, while user cancellations return to pending.
 Optional status notifications invalidate client data; displays reload persisted
 state so a delayed event cannot overwrite a replacement's status.

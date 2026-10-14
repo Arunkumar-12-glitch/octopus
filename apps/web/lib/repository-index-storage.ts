@@ -24,9 +24,15 @@ export async function getRepositoryIndexGeneration(owner: RepositoryIndexOwner):
   return "indexAttemptId" in owner ? owner.uploadId ?? owner.indexAttemptId : owner.activeIndexGeneration;
 }
 
+export function repositoryCodeStorageId(repoId: string, generation: string | null): string {
+  // Older binaries filter and delete solely by repoId. Keep generated indexes
+  // outside that legacy key so rolling upgrades cannot expose or erase them.
+  return generation === null ? repoId : JSON.stringify([repoId, generation]);
+}
+
 export function repositoryCodeFilter(repoId: string, generation: string | null): Schemas["Filter"] {
   return { must: [
-    { key: "repoId", match: { value: repoId } },
+    { key: "repoId", match: { value: repositoryCodeStorageId(repoId, generation) } },
     generation === null ? { is_empty: { key: "indexGeneration" } } : { key: "indexGeneration", match: { value: generation } },
   ] };
 }

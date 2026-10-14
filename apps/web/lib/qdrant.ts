@@ -170,7 +170,7 @@ export async function upsertChunks(
   }[],
   owner: RepositoryIndexOwner,
 ) {
-  const { getRepositoryIndexGeneration } = await import("@/lib/repository-index-storage");
+  const { getRepositoryIndexGeneration, repositoryCodeStorageId } = await import("@/lib/repository-index-storage");
   if (points.some(point => point.payload.repoId !== owner.repoId)) throw new Error("Index points must belong to the claimed repository");
   // createEmbeddings returns [] for points whose org is over its spend limit;
   // qdrant rejects dim=0 dense vectors, so drop those points before sending.
@@ -186,7 +186,10 @@ export async function upsertChunks(
     const generation = await getRepositoryIndexGeneration(owner);
     const slice = points.slice(i, i + 100).map((p) => ({
       id: toQdrantId(JSON.stringify([owner.repoId, generation, p.id])),
-      payload: sanitizePayload({ ...p.payload, originalId: p.id, indexGeneration: generation }),
+      payload: sanitizePayload({
+        ...p.payload, repoId: repositoryCodeStorageId(owner.repoId, generation),
+        logicalRepoId: owner.repoId, originalId: p.id, indexGeneration: generation,
+      }),
       vector: p.vector, sparseVector: p.sparseVector,
     }));
     const batch = slice.map((p) => ({
@@ -351,7 +354,7 @@ export async function searchCodeChunksAcrossRepos(
     text: (point.payload?.text as string) ?? "",
     startLine: (point.payload?.startLine as number) ?? 0,
     endLine: (point.payload?.endLine as number) ?? 0,
-    repoId: (point.payload?.repoId as string) ?? "",
+    repoId: ((point.payload?.logicalRepoId ?? point.payload?.repoId) as string) ?? "",
     score: point.score,
   }));
 }
