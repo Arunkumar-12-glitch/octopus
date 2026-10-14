@@ -10,7 +10,7 @@ const cases = [
   "local-count-under", "local-count-over", "background-replacement", "background-setup-failure",
   "background-notification-failure", "background-unconfigured",
   "storage-provider", "storage-local", "storage-reset", "storage-incremental",
-  "storage-late-upsert", "storage-late-delete", "storage-local-timeout", "storage-reads",
+  "storage-late-upsert", "storage-late-delete", "storage-local-timeout", "storage-reads", "storage-legacy-rollout",
   "storage-concurrent-incremental", "storage-incremental-cleanup", "storage-local-verified", "storage-local-legacy",
   "timezone-utc", "timezone-berlin",
 ] as const;

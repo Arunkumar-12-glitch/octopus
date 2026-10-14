@@ -27,6 +27,8 @@ export async function exerciseStorageRace(scenario: string, repo: Repository) {
   let transportFailed = false;
   let sparseFailure = false;
   let deleteCalls = 0;
+  const liveStorageUrl = scenario === "storage-legacy-rollout" ? process.env.FIRST_INDEX_QDRANT_URL : undefined;
+  if (liveStorageUrl) assert.equal(new URL(liveStorageUrl).hostname, "127.0.0.1", "Live fixture storage must be local and disposable");
   const service = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
     const url = new URL(request.url);
     const path = url.pathname;
@@ -56,7 +58,8 @@ export async function exerciseStorageRace(scenario: string, repo: Repository) {
     if (path.endsWith("/search")) return reply(points);
     throw new Error(`Unexpected fixture storage request: ${path}`);
   } });
-  process.env.QDRANT_URL = service.url.toString();
+  const storageUrl = new URL(liveStorageUrl ?? service.url.toString());
+  process.env.QDRANT_URL = storageUrl.toString();
   mock.module("@/lib/embed-config", () => ({ getEmbedConfig: () => ({ dim: 1 }) }));
   mock.module("@/lib/embeddings", () => ({ createEmbeddings: async (texts: string[]) => texts.map(() => [0.1]) }));
   let content = "baseline";
@@ -72,7 +75,7 @@ export async function exerciseStorageRace(scenario: string, repo: Repository) {
   const timeoutError = new DOMException("Fixture client timeout", "TimeoutError");
   globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(input instanceof Request ? input.url : String(input));
-    if (url.origin === service.url.origin) {
+    if (url.origin === storageUrl.origin) {
       const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
       const operation = url.pathname.endsWith("/delete") ? "delete" : url.pathname.endsWith("/points") && method === "PUT" ? "upsert" : undefined;
       if (operation && transportFailed) return Promise.reject(timeoutError);
@@ -93,7 +96,7 @@ export async function exerciseStorageRace(scenario: string, repo: Repository) {
     const { indexRepository, incrementalIndex } = await import("@/lib/indexer");
     const { runRepositoryIndex } = await import("@/lib/repository-index-completion");
     const { prepareRepoForLocalIndex, claimLocalIndexBatch, indexLocalBatch, recordLocalIndexProgress, markLocalIndexFailed } = await import("@/lib/index-local");
-    const { deleteRepoFileChunks, upsertChunks, getRepoChunks, searchSimilarChunks, searchCodeChunksAcrossRepos } = await import("@/lib/qdrant");
+    const { deleteRepoFileChunks, upsertChunks, getRepoChunks, searchSimilarChunks, searchCodeChunksAcrossRepos, getQdrantClient, ensureCollection } = await import("@/lib/qdrant");
     const { buildRepoGraph } = await import("@/lib/repo-graph");
     const snapshot = () => prisma.repository.findUniqueOrThrow({ where: { id: repo.id } });
     const claim = async () => {
@@ -105,6 +108,33 @@ export async function exerciseStorageRace(scenario: string, repo: Repository) {
       { repoId: repo.id, indexAttemptId }, repo.fullName, "main", 1,
     ));
     const stats = { indexedFiles: 1, totalFiles: 1, totalChunks: 1, totalVectors: 1, contributors: [], contributorCount: 0, durationMs: 1 };
+    if (scenario === "storage-legacy-rollout") {
+      const sharedId = randomUUID();
+      const legacyPoint = { id: sharedId, vector: [1], payload: { repoId: repo.id, filePath: "code.ts", text: "legacy" } };
+      await ensureCollection();
+      await getQdrantClient().upsert("code_chunks", { wait: true, points: [legacyPoint] });
+      await upsertChunks([{ ...legacyPoint, payload: { ...legacyPoint.payload, text: "new generation" } }], {
+        repoId: repo.id, indexAttemptId: repo.indexAttemptId!,
+      });
+      // These are the deployed legacy reader/deleter contracts, with no
+      // awareness of generations or the new database field.
+      const legacyFilter = { must: [{ key: "repoId", match: { value: repo.id } }] };
+      const legacyRead = () => getQdrantClient().search("code_chunks", {
+        vector: [1], filter: legacyFilter, limit: 20, with_payload: true,
+      });
+      assert.deepEqual((await legacyRead()).map(point => point.payload?.text), ["legacy"], "Legacy readers must not see staged generations");
+      await runRepositoryIndex(repo.id, repo.indexAttemptId!, async () => stats);
+      assert.deepEqual((await searchCodeChunksAcrossRepos([repo.id], [1])).map(point => ({ repoId: point.repoId, text: point.text })), [
+        { repoId: repo.id, text: "new generation" },
+      ], "API results must retain the logical repository ID");
+      await getQdrantClient().delete("code_chunks", { wait: true, filter: legacyFilter });
+      assert.deepEqual(await getRepoChunks(repo.id), ["new generation"], "A late legacy repo-wide delete must not remove the active generation");
+      await getQdrantClient().upsert("code_chunks", { wait: true, points: [legacyPoint] });
+      assert.deepEqual(await getRepoChunks(repo.id), ["new generation"], "Legacy point IDs must not overwrite generation points");
+      assert.deepEqual((await legacyRead()).map(point => point.payload?.text), ["legacy"]);
+      assert.deepEqual((await buildRepoGraph(repo.id)).nodes.map(node => node.path), ["code.ts"]);
+      return;
+    }
     if (scenario === "storage-reads") {
       const sharedId = randomUUID();
       stored.set(sharedId, { id: sharedId, vector: [1], payload: { repoId: repo.id, filePath: "legacy.ts", text: "legacy" } });
