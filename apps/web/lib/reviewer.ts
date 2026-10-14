@@ -1,7 +1,9 @@
 import "server-only";
+import { runRepositoryIndex, SupersededIndexError } from "@/lib/repository-index-completion";
 import crypto from "node:crypto";
 import { prisma, type Prisma } from "@octopus/db";
 import { pubby } from "@/lib/pubby";
+import { notifyRepositoryIndex } from "@/lib/repository-index-notifications";
 import {
   searchSimilarChunks,
   searchKnowledgeChunks,
@@ -935,9 +937,10 @@ async function processReviewInternal(pullRequestId: string, executionWindow?: Re
 
       // Atomic claim: only one process can transition to "indexing" at a time.
       // If another process is already indexing, wait for it to finish instead of starting a parallel index.
+      const indexAttemptId = crypto.randomUUID();
       const claimResult = await prisma.repository.updateMany({
         where: { id: repo.id, indexStatus: { notIn: ["indexed", "indexing"] } },
-        data: { indexStatus: "indexing" },
+        data: { indexStatus: "indexing", indexAttemptId },
       });
       let shouldRunIndexing = claimResult.count > 0;
 
@@ -972,7 +975,7 @@ async function processReviewInternal(pullRequestId: string, executionWindow?: Re
           // Peer failed -- attempt conditional reclaim
           const reclaimed = await prisma.repository.updateMany({
             where: { id: repo.id, indexStatus: { notIn: ["indexed", "indexing"] } },
-            data: { indexStatus: "indexing" },
+            data: { indexStatus: "indexing", indexAttemptId },
           });
           let finalCheckStatus: string | null = null;
           if (reclaimed.count === 0) {
@@ -1008,21 +1011,7 @@ async function processReviewInternal(pullRequestId: string, executionWindow?: Re
 
       // ── Run indexing (only if we hold the claim) ──
       if (shouldRunIndexing) {
-        if (reviewCommentId) {
-          await providerUpdateComment(
-            reviewCommentId,
-            "> 🐙 **Octopus Review** — This repository hasn't been indexed yet.\n>\n> Indexing in progress... this may take a few minutes. (Step 1/3)",
-          );
-        }
-
         const indexChannel = `presence-org-${org.id}`;
-        await deleteSyncLogs(org.id, repo.id);
-
-        pubby.trigger(indexChannel, "index-status", {
-          repoId: repo.id,
-          status: "indexing",
-        }).catch((err) => console.error("[reviewer] Pubby index-status trigger failed:", err));
-
         const emitIndexLog = (message: string, level: LogLevel = "info") => {
           const timestamp = Date.now();
           pubby.trigger(indexChannel, "index-log", {
@@ -1040,40 +1029,38 @@ async function processReviewInternal(pullRequestId: string, executionWindow?: Re
           });
         };
 
-        const indexStats = await indexRepository(
-          repo.id,
-          repo.fullName,
-          repo.defaultBranch,
-          installationId ?? 0,
-          emitIndexLog,
-          undefined,
-          repo.provider,
-          repo.organizationId,
-        );
+        const indexStats = await runRepositoryIndex(repo.id, indexAttemptId, async () => {
+          if (reviewCommentId) {
+            await providerUpdateComment(
+              reviewCommentId,
+              "> 🐙 **Octopus Review** — This repository hasn't been indexed yet.\n>\n> Indexing in progress... this may take a few minutes. (Step 1/3)",
+            );
+          }
 
-        await prisma.repository.update({
-          where: { id: repo.id },
-          data: {
-            indexStatus: "indexed",
-            analysisStatus: "none",
-            indexedAt: new Date(),
-            indexedFiles: indexStats.indexedFiles,
-            totalFiles: indexStats.totalFiles,
-            totalChunks: indexStats.totalChunks,
-            totalVectors: indexStats.totalVectors,
-            indexDurationMs: indexStats.durationMs,
-            contributorCount: indexStats.contributorCount,
-            contributors: JSON.parse(JSON.stringify(indexStats.contributors)),
-            ...(indexStats.resolvedDefaultBranch ? { defaultBranch: indexStats.resolvedDefaultBranch } : {}),
-          },
+          await deleteSyncLogs(org.id, repo.id);
+
+          void notifyRepositoryIndex(indexChannel, repo.id);
+
+          return indexRepository(
+            { repoId: repo.id, indexAttemptId }, repo.fullName, repo.defaultBranch, installationId ?? 0,
+            emitIndexLog, undefined, repo.provider, repo.organizationId,
+          );
+        }).catch(async error => {
+          if (!(error instanceof SupersededIndexError)) {
+            void notifyRepositoryIndex(indexChannel, repo.id);
+          }
+          throw error;
         });
+
+        const current = await prisma.repository.updateMany({
+          where: { id: repo.id, indexStatus: "indexed", indexAttemptId },
+          data: { analysisStatus: "none" },
+        });
+        if (!current.count) throw new SupersededIndexError();
 
         emitIndexLog(`Indexing complete: ${indexStats.indexedFiles} files, ${indexStats.totalVectors} vectors`, "success");
 
-        pubby.trigger(indexChannel, "index-status", {
-          repoId: repo.id,
-          status: "indexed",
-        }).catch((err) => console.error("[reviewer] Pubby index-status trigger failed:", err));
+        void notifyRepositoryIndex(indexChannel, repo.id);
 
         console.log(`[reviewer] Indexing complete: ${indexStats.indexedFiles} files, ${indexStats.totalVectors} vectors`);
 
@@ -2614,20 +2601,6 @@ async function processReviewInternal(pullRequestId: string, executionWindow?: Re
       await projectProvider
         .setCommitStatus(org.id, projectPath, pr.headSha, "failed", COMMIT_STATUS_NAME, `Review error: ${errorMessage}`.slice(0, 255))
         .catch((e) => console.error("[reviewer] Failed to set provider failed status:", e));
-    }
-
-    // If indexing was in progress, mark it as failed (check current DB state, not stale in-memory value)
-    const repoStatusNow = await prisma.repository.findUnique({ where: { id: repo.id }, select: { indexStatus: true } }).catch(() => null);
-    if (repoStatusNow?.indexStatus === "indexing") {
-      await prisma.repository.update({
-        where: { id: repo.id },
-        data: { indexStatus: "failed" },
-      }).catch((e) => console.error("[reviewer] Failed to update repo index status:", e));
-
-      pubby.trigger(`presence-org-${org.id}`, "index-status", {
-        repoId: repo.id,
-        status: "failed",
-      }).catch((e) => console.error("[reviewer] Pubby index-status failed trigger failed:", e));
     }
 
     const failedUpdate = await updateCurrentReview(pr.id, pr.headSha, pr.reviewRequestVersion, {

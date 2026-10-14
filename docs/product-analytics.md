@@ -57,6 +57,49 @@ completeness. Missing payloads, missing organisation links and conflicting event
 identities need reconciliation. Keep currencies separate. Refunds are separate
 events; gross conversion and retained revenue answer different questions.
 
+### First successful index
+
+`firstIndexedAt` is the earliest known completion of a full, usable repository
+index. Re-indexing never moves it forward. `indexedAt` remains the latest stored
+index time; neither timestamp is the organisation's activation event.
+
+A full provider index qualifies only after every eligible file has been read and
+all resulting chunks have been embedded and stored. Ignore rules, unsupported
+files, binary content and configured size limits are intentional exclusions.
+File-read failures, truncated inventories, incomplete embeddings, cancelled or
+superseded attempts do not qualify. A valid empty snapshot can still support
+reviewing a first PR, but does not set this milestone. Incremental updates cannot
+establish a first full index: they leave a null `indexedAt` unchanged until a
+usable full index completes, and refresh only an existing non-null `indexedAt`.
+
+Full runs and local uploads write to separate generations. Point IDs and every
+code-index query or deletion are scoped to that generation. The guarded database
+completion transaction activates the generation together with its statistics and
+milestones; staged, failed and cancelled runs remain invisible to search. A late
+remote mutation after a client timeout can only affect its original generation.
+Existing rows start with a null active generation and read only legacy untagged
+data until a full replacement completes; there is no backfill.
+Incremental updates bind the stable active generation, so
+metadata edits and other merges do not invalidate their writes or failure cleanup.
+Previous and abandoned generations remain stored; this change adds no cleanup job.
+Queue timeouts persist as failures, while user cancellations return to pending.
+Optional status notifications invalidate client data; displays reload persisted
+state so a delayed event cannot overwrite a replacement's status.
+
+For local uploads, the server validates ordered batches, unique paths and the
+declared file count. The first response returns `uploadId`; send it unchanged
+with every later batch to bind the upload to the same attempt. A single batch
+also qualifies if it produces a complete, usable index. Older clients remain
+supported without `uploadId`, but their unverified multi-batch completion never
+establishes a first-index date; any previously recorded date is preserved.
+The CLI implementation is maintained separately.
+
+Rows with an earlier `indexedAt` and no `firstIndexedAt` retain an unknown first
+date. Do not backfill from the latest date or present null as “never indexed.”
+Exporting this field in the restricted analytics views remains separate
+reviewed work under #924; this change does not alter live
+PostHog sources, schedules or grants.
+
 ## Restricted source dataset
 
 `scripts/analytics/access.sql` installs four security-barrier views and a

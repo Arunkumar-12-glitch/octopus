@@ -58,7 +58,7 @@ const pr = {
   headSha: "a".repeat(40), reviewRequestVersion: 1, status: "pending",
 };
 mock.module("@octopus/db", () => ({ prisma: {
-  repository: { findUnique: async () => repo },
+  repository: { findUnique: async () => repo, findMany: async () => [{ id: repo.id, activeIndexGeneration: null }] },
   systemConfig: { findUnique: async () => null },
   reviewIssue: { findMany: async () => [] },
   reviewAttempt: { findFirst: async () => null },

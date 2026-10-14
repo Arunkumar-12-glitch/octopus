@@ -7,9 +7,11 @@ import { headers, cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { auth } from "@/lib/auth";
+import { randomUUID } from "node:crypto";
 import { prisma } from "@octopus/db";
 import { hasOrgPermission } from "@/lib/org-permissions";
 import { pubby } from "@/lib/pubby";
+import { notifyRepositoryIndex } from "@/lib/repository-index-notifications";
 import { writeSyncLog, deleteSyncLogs } from "@/lib/elasticsearch";
 import { GithubRateLimitError } from "@/lib/github";
 import { syncOrgRepos } from "@/lib/repo-sync";
@@ -609,6 +611,7 @@ export async function indexRepository(repoId: string): Promise<{ error?: string 
       defaultBranch: true,
       installationId: true,
       indexStatus: true,
+      indexAttemptId: true,
       indexedAt: true,
       updatedAt: true,
       organizationId: true,
@@ -667,11 +670,6 @@ export async function indexRepository(repoId: string): Promise<{ error?: string 
     if (elapsed < STALE_INDEX_MS) {
       return { error: "Indexing is already in progress." };
     }
-    // Stale — reset and continue
-    await prisma.repository.update({
-      where: { id: repoId },
-      data: { indexStatus: "pending" },
-    });
   }
 
   if (repo.indexedAt) {
@@ -691,7 +689,7 @@ export async function indexRepository(repoId: string): Promise<{ error?: string 
       message,
       level,
       timestamp,
-    });
+    }).catch(error => console.warn("[repository-index] log notification failed:", error));
     writeSyncLog({
       orgId: repo.organizationId,
       repoId: repo.id,
@@ -704,19 +702,14 @@ export async function indexRepository(repoId: string): Promise<{ error?: string 
   // Clear previous sync logs before starting new indexing
   await deleteSyncLogs(repo.organizationId, repo.id);
 
-  await prisma.repository.update({
-    where: { id: repoId },
-    data: { indexStatus: "indexing" },
+  const indexAttemptId = randomUUID();
+  const claim = await prisma.repository.updateMany({
+    where: { id: repoId, indexStatus: repo.indexStatus, updatedAt: repo.updatedAt },
+    data: { indexStatus: "indexing", indexAttemptId },
   });
-
-  pubby.trigger(channel, "index-status", {
-    repoId: repo.id,
-    status: "indexing",
-  });
-
-  emitLog(`Starting indexing for ${repo.fullName}...`);
-
-  const abortController = createAbortController(repoId);
+  if (!claim.count) return { error: "Repository state changed or indexing is already in progress." };
+  if (repo.indexStatus === "indexing" && repo.indexAttemptId) abortIndexing(repo.indexAttemptId);
+  const abortController = createAbortController(indexAttemptId);
 
   // Fire-and-forget: run indexing in background so the server action returns immediately.
   // Progress and completion are pushed to the client via Pubby real-time events.
@@ -729,6 +722,7 @@ export async function indexRepository(repoId: string): Promise<{ error?: string 
     channel,
     emitLog,
     abortController,
+    indexAttemptId,
     repo.provider,
   );
 
@@ -744,6 +738,8 @@ export async function cancelIndexing(repoId: string): Promise<{ error?: string }
     select: {
       id: true,
       indexStatus: true,
+      indexAttemptId: true,
+      updatedAt: true,
       organizationId: true,
       organization: {
         select: {
@@ -765,32 +761,14 @@ export async function cancelIndexing(repoId: string): Promise<{ error?: string }
     return { error: "Repository is not currently indexing." };
   }
 
-  const aborted = abortIndexing(repoId);
-
-  if (!aborted) {
-    // No in-memory controller found — the process is dead (e.g. server restart).
-    // Directly reset the DB status so the user isn't stuck.
-    try {
-      console.warn(
-        `[abort-indexing] No in-memory controller for repo ${repoId}, resetting DB status directly`,
-      );
-
-      await prisma.repository.update({
-        where: { id: repoId },
-        data: { indexStatus: "pending" },
-      });
-
-      revalidatePath("/repositories");
-    } catch (error) {
-      console.error(`[abort-indexing] Failed to reset status for repo ${repoId}:`, error);
-      return { error: "Failed to cancel indexing. Please try again." };
-    }
-
-    pubby.trigger(`presence-org-${repo.organizationId}`, "index-status", {
-      repoId,
-      status: "cancelled",
-    });
-  }
+  const cancelled = await prisma.repository.updateMany({
+    where: { id: repoId, indexStatus: "indexing", indexAttemptId: repo.indexAttemptId, updatedAt: repo.updatedAt },
+    data: { indexStatus: "pending" },
+  });
+  if (!cancelled.count) return { error: "Indexing attempt is no longer current." };
+  if (repo.indexAttemptId) abortIndexing(repo.indexAttemptId);
+  revalidatePath("/repositories");
+  void notifyRepositoryIndex(`presence-org-${repo.organizationId}`, repoId);
 
   return {};
 }
