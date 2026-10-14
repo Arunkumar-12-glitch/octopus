@@ -1,3 +1,5 @@
+import "server-only";
+import { recordRepositoryIndexCompletion } from "@/lib/repository-index-completion";
 import { prisma } from "@octopus/db";
 import { generateLocalReview } from "@/lib/review-core";
 import { indexRepository } from "@/lib/indexer";
@@ -139,7 +141,6 @@ export async function processCommunityReview(jobId: string): Promise<void> {
             where: { id: repo.id },
             data: {
               indexStatus: "indexed",
-              indexedAt: new Date(),
               indexedFiles: indexStats.indexedFiles,
               totalFiles: indexStats.totalFiles,
               totalChunks: indexStats.totalChunks,
@@ -152,6 +153,7 @@ export async function processCommunityReview(jobId: string): Promise<void> {
                 : {}),
             },
           });
+          await recordRepositoryIndexCompletion(repo.id);
 
           LOG(jobId, `index done: ${indexStats.indexedFiles} files, ${indexStats.totalVectors} vectors`);
 

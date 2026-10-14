@@ -1,4 +1,5 @@
 import "server-only";
+import { recordRepositoryIndexCompletion } from "@/lib/repository-index-completion";
 import crypto from "node:crypto";
 import { prisma, type Prisma } from "@octopus/db";
 import { pubby } from "@/lib/pubby";
@@ -1056,7 +1057,6 @@ async function processReviewInternal(pullRequestId: string, executionWindow?: Re
           data: {
             indexStatus: "indexed",
             analysisStatus: "none",
-            indexedAt: new Date(),
             indexedFiles: indexStats.indexedFiles,
             totalFiles: indexStats.totalFiles,
             totalChunks: indexStats.totalChunks,
@@ -1067,6 +1067,7 @@ async function processReviewInternal(pullRequestId: string, executionWindow?: Re
             ...(indexStats.resolvedDefaultBranch ? { defaultBranch: indexStats.resolvedDefaultBranch } : {}),
           },
         });
+        await recordRepositoryIndexCompletion(repo.id);
 
         emitIndexLog(`Indexing complete: ${indexStats.indexedFiles} files, ${indexStats.totalVectors} vectors`, "success");
 

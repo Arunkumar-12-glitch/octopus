@@ -64,6 +64,7 @@ const pr = {
   firstReviewCompletedAt: null as Date | null,
 };
 mock.module("@octopus/db", () => ({ prisma: {
+  $executeRaw: async () => 1,
   reviewAttempt: { findFirst: async (query: unknown) => {
     assert.deepEqual(query, { where: { pullRequestId: "pr" }, orderBy: { createdAt: "desc" }, select: { coverage: true } });
     if (lookupFailure) throw new Error("fixture lookup failure");

@@ -1,4 +1,5 @@
 import "server-only";
+import { recordRepositoryIndexCompletion } from "@/lib/repository-index-completion";
 import crypto from "node:crypto";
 import { prisma } from "@octopus/db";
 import { chunkText, shouldIndex, MAX_FILE_SIZE } from "@/lib/index-chunking";
@@ -264,7 +265,6 @@ export async function recordLocalIndexProgress(
       ...(commit
         ? {
             indexStatus: "indexed",
-            indexedAt: new Date(),
             // Only report a duration when the start time is reliable (a
             // single-batch upload, where the finalizing request also began the
             // index). Multi-batch uploads are stateless per request with no
@@ -275,6 +275,7 @@ export async function recordLocalIndexProgress(
         : {}),
     },
   });
+  if (commit) await recordRepositoryIndexCompletion(repoId);
 }
 
 export async function markLocalIndexFailed(repoId: string): Promise<void> {

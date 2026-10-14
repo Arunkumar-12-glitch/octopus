@@ -1,3 +1,5 @@
+import "server-only";
+import { recordRepositoryIndexCompletion } from "@/lib/repository-index-completion";
 import { authenticateApiToken } from "@/lib/api-auth";
 import { prisma } from "@octopus/db";
 import { generateLocalReview } from "@/lib/review-core";
@@ -269,7 +271,6 @@ export async function POST(request: NextRequest) {
         where: { id: repo.id },
         data: {
           indexStatus: "indexed",
-          indexedAt: new Date(),
           indexedFiles: indexStats.indexedFiles,
           totalFiles: indexStats.totalFiles,
           totalChunks: indexStats.totalChunks,
@@ -280,6 +281,7 @@ export async function POST(request: NextRequest) {
           ...(indexStats.resolvedDefaultBranch ? { defaultBranch: indexStats.resolvedDefaultBranch } : {}),
         },
       });
+      await recordRepositoryIndexCompletion(repo.id);
 
       try {
         const { summary, purpose } = await summarizeRepository(repo.id, fullName, orgId);

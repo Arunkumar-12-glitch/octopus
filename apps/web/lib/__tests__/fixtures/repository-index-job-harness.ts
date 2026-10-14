@@ -26,6 +26,7 @@ mock.module("@/lib/indexing-abort", () => ({
 }));
 mock.module("@octopus/db", () => ({
   prisma: {
+    $executeRaw: async () => 1,
     repository: {
       findMany: async (args: { where: Record<string, unknown> }) => { queries.push(args); return [{ id: "repo-1" }]; },
       findFirst: async (args: { where: Record<string, unknown> }) => { queries.push(args); return currentRow; },

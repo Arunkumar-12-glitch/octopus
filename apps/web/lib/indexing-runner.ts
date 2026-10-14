@@ -1,3 +1,5 @@
+import "server-only";
+import { recordRepositoryIndexCompletion } from "@/lib/repository-index-completion";
 import { prisma } from "@octopus/db";
 import { pubby } from "@/lib/pubby";
 import { clearAbortController } from "@/lib/indexing-abort";
@@ -32,7 +34,6 @@ export async function runIndexingInBackground(
       where: { id: repoId },
       data: {
         indexStatus: "indexed",
-        indexedAt: new Date(),
         totalFiles: stats.totalFiles,
         indexedFiles: stats.indexedFiles,
         totalChunks: stats.totalChunks,
@@ -43,6 +44,7 @@ export async function runIndexingInBackground(
         ...(stats.resolvedDefaultBranch ? { defaultBranch: stats.resolvedDefaultBranch } : {}),
       },
     });
+    await recordRepositoryIndexCompletion(repoId);
 
     emitLog(`Indexing completed for ${fullName}`, "success");
 

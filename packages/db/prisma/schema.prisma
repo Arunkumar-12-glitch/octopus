@@ -315,6 +315,7 @@ model Repository {
   webhookSetupStatus Json?
   indexStatus    String   @default("pending") // pending | indexing | indexed | failed
   indexedAt      DateTime?
+  firstIndexedAt DateTime?
   indexedFiles   Int      @default(0)
   totalFiles     Int      @default(0)
   totalChunks    Int      @default(0)

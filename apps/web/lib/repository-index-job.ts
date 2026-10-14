@@ -1,4 +1,5 @@
 import "server-only";
+import { recordRepositoryIndexCompletion } from "@/lib/repository-index-completion";
 import { prisma } from "@octopus/db";
 import { enqueue } from "@/lib/queue";
 import type { LogLevel } from "@/lib/indexer";
@@ -95,7 +96,6 @@ export async function processRepositoryIndex(job: RepositoryIndexJob) {
       where: { id: repo.id },
       data: {
         indexStatus: "indexed",
-        indexedAt: new Date(),
         totalFiles: stats.totalFiles,
         indexedFiles: stats.indexedFiles,
         totalChunks: stats.totalChunks,
@@ -106,6 +106,7 @@ export async function processRepositoryIndex(job: RepositoryIndexJob) {
         ...(stats.resolvedDefaultBranch ? { defaultBranch: stats.resolvedDefaultBranch } : {}),
       },
     });
+    await recordRepositoryIndexCompletion(repo.id);
     log(`Indexing complete: ${stats.indexedFiles} files, ${stats.totalVectors} vectors`, "success");
     await notify("indexed");
   } catch (error) {
