@@ -8,7 +8,7 @@ let writes = 0;
 const embedded: string[][] = [];
 let afterUpsert: (() => void) | undefined;
 let invalidEmbeddings = false;
-let suppliedToken: string | undefined;
+let suppliedToken: string | undefined = undefined;
 let ignoreContent: string | null = null;
 mock.module("@/lib/github", () => ({
   getInstallationToken: async () => { assert.equal(suppliedToken, undefined); return "test-token"; },
