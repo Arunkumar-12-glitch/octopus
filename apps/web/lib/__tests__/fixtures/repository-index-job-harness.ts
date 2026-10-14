@@ -12,6 +12,13 @@ let currentRow: typeof row | null = row;
 let claimCount = 1;
 let indexFailure: Error | null = null;
 let cancelled = false;
+let timedOut = false;
+let timeoutCallback: (() => void) | undefined;
+const realSetTimeout = globalThis.setTimeout;
+globalThis.setTimeout = ((callback: () => void, ms?: number, ...args: unknown[]) => {
+  if (ms === 25 * 60_000) timeoutCallback = callback;
+  return realSetTimeout(callback, ms, ...args);
+}) as typeof setTimeout;
 let populated = false;
 let preparationFailure = false;
 let replaceAttempt = false;
@@ -64,7 +71,7 @@ const db = {
   },
 };
 mock.module("@octopus/db", () => ({ prisma: db }));
-mock.module("@/lib/pubby", () => ({ pubby: { trigger: async (_channel: string, _event: string, data: { status: string }) => { notifications.push(data.status); } } }));
+mock.module("@/lib/pubby", () => ({ pubby: { trigger: async () => { notifications.push(currentRow!.indexStatus); } } }));
 mock.module("@/lib/elasticsearch", () => ({ writeSyncLog: () => {}, deleteSyncLogs: async () => {
   assert.ok(currentRow?.indexAttemptId);
   if (preparationFailure) throw new Error("Index setup failed");
@@ -72,7 +79,8 @@ mock.module("@/lib/elasticsearch", () => ({ writeSyncLog: () => {}, deleteSyncLo
 mock.module("@/lib/indexer", () => ({
   indexRepository: async (...args: unknown[]) => {
     indexCalls.push(args);
-    if (cancelled) { controller.abort(); throw new Error("Indexing cancelled"); }
+    if (cancelled) { controller.abort(); throw controller.signal.reason; }
+    if (timedOut) { assert.ok(timeoutCallback); timeoutCallback(); throw controller.signal.reason; }
     if (replaceAttempt) {
       Object.assign(currentRow!, { indexStatus: "indexing", indexAttemptId: "replacement" });
       throw new Error("Old worker failed after replacement");
@@ -138,6 +146,14 @@ assert.equal(indexCalls.at(-1)?.[6], "forgejo", "Forgejo jobs must not use GitHu
 cancelled = true;
 await processRepositoryIndex(job);
 assert.equal(claims.at(-1)?.data.indexStatus, "pending", "cancelled work must release its claim");
+assert.equal(notifications.at(-1), "pending");
+cancelled = false;
+timedOut = true;
+await assert.rejects(() => processRepositoryIndex(job), { name: "TimeoutError" });
+assert.equal(currentRow?.indexStatus, "failed");
+assert.equal(notifications.at(-1), "failed");
+assert.equal(currentRow?.firstIndexedAt, null);
+timedOut = false;
 const priorQueries = queries.length;
 await enqueuePendingRepositoryIndexes("org-1", undefined, ["bitbucket", "gitlab", "unrecognized"]);
 assert.equal(queries.length, priorQueries, "provider-scoped setup must not expand the indexing allowlist");
@@ -164,4 +180,5 @@ await processRepositoryIndex(job);
 assert.equal(currentRow?.indexStatus, "indexing");
 assert.equal(currentRow?.indexAttemptId, "replacement");
 assert.deepEqual(notifications, ["indexing"]);
+globalThis.setTimeout = realSetTimeout;
 console.log("Repository queue, tenant, claim, empty snapshot, failure, retry and cancellation checks passed");

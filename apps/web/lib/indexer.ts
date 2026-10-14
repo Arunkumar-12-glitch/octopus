@@ -48,7 +48,7 @@ export interface IndexStats {
 }
 
 export async function indexRepository(
-  repoId: string,
+  attempt: { repoId: string; indexAttemptId: string },
   fullName: string,
   defaultBranch: string,
   installationId: number,
@@ -59,6 +59,8 @@ export async function indexRepository(
   /** Pre-resolved token (e.g. GITHUB_TOKEN from Actions). Skips getInstallationToken when provided. */
   providedToken?: string,
 ): Promise<IndexStats> {
+  const { repoId } = attempt;
+  const owner = { ...attempt, signal };
   const startTime = Date.now();
 
   const allChunks: {
@@ -513,7 +515,7 @@ export async function indexRepository(
       if (signal?.aborted) throw new Error("Indexing cancelled");
       // An empty snapshot must not leave searchable chunks from an older tree.
       await ensureCollection();
-      await deleteRepoChunks(repoId);
+      await deleteRepoChunks(owner);
     }
     signal?.throwIfAborted();
     onLog("No indexable content found", "warning");
@@ -536,7 +538,7 @@ export async function indexRepository(
 
   // 4. Delete old chunks for this repo
   onLog("Cleaning up previous index data...");
-  await deleteRepoChunks(repoId);
+  await deleteRepoChunks(owner);
   onLog("Previous data cleared", "success");
 
   // 5. Create embeddings in batches
@@ -588,7 +590,7 @@ export async function indexRepository(
 
   const qdrantBatches = Math.ceil(points.length / 100);
   onLog(`Storing ${points.length} vectors in database (${qdrantBatches} batch${qdrantBatches > 1 ? "es" : ""})...`);
-  await upsertChunks(points);
+  await upsertChunks(points, owner);
   signal?.throwIfAborted();
   onLog(`Successfully stored ${points.length} vectors`, "success");
 
@@ -635,7 +637,7 @@ async function loadIncrementalIgnore(
  * The repo stays "indexed" throughout — no downtime window.
  */
 export async function incrementalIndex(
-  repoId: string,
+  owner: { repoId: string; updatedAt: Date },
   fullName: string,
   defaultBranch: string,
   installationId: number,
@@ -643,6 +645,7 @@ export async function incrementalIndex(
   provider: string = "github",
   organizationId?: string,
 ): Promise<{ updatedFiles: number; removedFiles: number; newVectors: number }> {
+  const { repoId } = owner;
   const removed = changedFiles
     .filter((f) => f.status === "removed")
     .map((f) => f.filename);
@@ -659,7 +662,7 @@ export async function incrementalIndex(
   const allChangedPaths = [...new Set([...removed, ...addedOrModified])];
   if (allChangedPaths.length > 0) {
     await ensureCollection();
-    await deleteRepoFileChunks(repoId, allChangedPaths);
+    await deleteRepoFileChunks(owner, allChangedPaths);
   }
 
   // 2. Fetch and chunk only added/modified files
@@ -756,7 +759,7 @@ export async function incrementalIndex(
     },
   }));
 
-  await upsertChunks(points);
+  await upsertChunks(points, owner);
 
   return { updatedFiles: addedOrModified.length, removedFiles: removed.length, newVectors: points.length };
 }

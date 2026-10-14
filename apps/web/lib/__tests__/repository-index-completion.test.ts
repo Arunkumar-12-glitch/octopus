@@ -8,6 +8,8 @@ const cases = [
   "local-single", "local-verified", "local-legacy", "local-nonfinal", "local-gap", "local-duplicate", "local-wrong-session", "local-cancel",
   "actions", "community", "empty-incremental-full", "legacy-incremental",
   "local-count-under", "local-count-over", "background-replacement", "background-setup-failure",
+  "background-notification-failure", "background-unconfigured",
+  "storage-provider", "storage-local", "storage-reset", "storage-incremental",
   "timezone-utc", "timezone-berlin",
 ] as const;
 

@@ -38,7 +38,10 @@ const stats = { totalFiles: 2, indexedFiles: 1, totalChunks: 1, totalVectors: 1,
   contributors: [], contributorCount: 0, durationMs: 10 };
 
 try {
-  if (scenario.startsWith("timezone-")) {
+  if (scenario.startsWith("storage-")) {
+    const { exerciseStorageRace } = await import("./repository-index-storage-harness");
+    await exerciseStorageRace(scenario, repo);
+  } else if (scenario.startsWith("timezone-")) {
     const session = await prisma.$queryRaw<Array<{ TimeZone: string }>>`SHOW TimeZone`;
     assert.equal(session[0].TimeZone, sessionTimezone);
     const completedAt = new Date("2026-07-01T12:34:56.789Z");
@@ -113,7 +116,7 @@ try {
     const result = await snapshot();
     assert.deepEqual(result.firstIndexedAt, early);
     assert.deepEqual(result.indexedAt, times[1]);
-  } else if (["failed", "cancelled", "background", "late-cancel", "empty", "superseded", "background-replacement", "background-setup-failure"].includes(scenario)) {
+  } else if (["failed", "cancelled", "background", "late-cancel", "empty", "superseded", "background-replacement", "background-setup-failure", "background-notification-failure", "background-unconfigured"].includes(scenario)) {
     const controller = new AbortController();
     const notifications: string[] = [];
     mock.module("@/lib/indexer", () => ({ indexRepository: async () => {
@@ -127,9 +130,13 @@ try {
       if (scenario === "superseded") await prisma.repository.update({ where: { id: repo.id }, data: { indexStatus: "pending", indexAttemptId: null } });
       return scenario === "empty" ? { ...stats, indexedFiles: 0, totalChunks: 0, totalVectors: 0 } : stats;
     } }));
-    mock.module("@/lib/pubby", () => ({ pubby: { trigger: async (_channel: string, _event: string, data: { status: string }) => {
-      if (scenario === "background-setup-failure" && data.status === "indexing") throw new Error("Setup notification failed");
-      notifications.push(data.status);
+    let notificationAttempts = 0;
+    mock.module("@/lib/pubby", () => ({ pubby: { trigger: (_channel: string, _event: string, data: { repoId: string }) => {
+      notificationAttempts++;
+      if (scenario === "background-unconfigured") throw new Error("Pubby is not configured");
+      if ((scenario === "background-setup-failure" && notificationAttempts === 1) || scenario === "background-notification-failure") return Promise.reject(new Error("Notification unavailable"));
+      notifications.push(data.repoId);
+      return Promise.resolve();
     } } }));
     mock.module("@/lib/events", () => ({ eventBus: { emit: () => {} } }));
     mock.module("@/lib/summarizer", () => ({ summarizeRepository: async () => ({ summary: "Fixture", purpose: "Fixture" }) }));
@@ -137,12 +144,15 @@ try {
     const { runIndexingInBackground } = await import("@/lib/indexing-runner");
     await runIndexingInBackground(repo.id, repo.fullName, "main", org.id, 0, "fixture", () => {}, controller, indexAttemptId);
     const result = await snapshot();
-    assert.equal(result.firstIndexedAt !== null, scenario === "background");
-    assert.equal(result.indexedAt !== null, scenario === "background");
+    const succeeds = ["background", "background-setup-failure", "background-notification-failure", "background-unconfigured"].includes(scenario);
+    assert.equal(result.firstIndexedAt !== null, succeeds);
+    assert.equal(result.indexedAt !== null, succeeds);
+    if (succeeds) assert.equal(result.indexStatus, "indexed");
+    if (scenario === "background-unconfigured") assert.equal(notificationAttempts, 2);
+    if (scenario === "background-notification-failure") assert.equal(notificationAttempts, 2);
     if (scenario === "superseded") assert.equal(result.indexStatus, "pending");
-    if (["superseded", "background-replacement"].includes(scenario)) assert.deepEqual(notifications, ["indexing"]);
+    if (["superseded", "background-replacement"].includes(scenario)) assert.deepEqual(notifications, [repo.id]);
     if (scenario === "background-replacement") assert.equal(result.indexStatus, "indexing");
-    if (scenario === "background-setup-failure") assert.equal(result.indexStatus, "failed");
   } else if (scenario === "empty-then-content" || scenario === "failed-reindex") {
     const emptyStats = { ...stats, indexedFiles: 0, totalChunks: 0, totalVectors: 0 };
     await runRepositoryIndex(repo.id, indexAttemptId, async () => scenario === "empty-then-content" ? emptyStats : stats);
@@ -180,7 +190,7 @@ try {
     let calls = 0;
     mock.module("@/lib/indexer", () => ({ indexRepository: async (...args: unknown[]) => {
       calls++;
-      assert.equal(args[0], repo.id);
+      assert.deepEqual(args[0], { repoId: repo.id, indexAttemptId: (await snapshot()).indexAttemptId });
       assert.equal(args[3], 0);
       assert.equal(args[8], "fixture-token");
       assert.ok((await snapshot()).indexAttemptId);
@@ -254,7 +264,7 @@ try {
       throw new Error(`Unexpected fixture request: ${path}`);
     }) as typeof fetch;
     const { indexRepository } = await import("@/lib/indexer");
-    const index = () => indexRepository(repo.id, repo.fullName, "main", 1);
+    const index = () => indexRepository({ repoId: repo.id, indexAttemptId }, repo.fullName, "main", 1);
     await runRepositoryIndex(repo.id, indexAttemptId, index);
     if (scenario === "legacy-incremental") await prisma.repository.update({ where: { id: repo.id }, data: { indexedAt: early } });
     const { POST } = await import("@/app/api/github/webhook/route");
@@ -286,7 +296,7 @@ try {
     const files = [{ path: "a.ts", content: "export const a = 1;" }, { path: "b.ts", content: "export const b = 2;" }];
     const firstFiles = single ? files : files.slice(0, 1);
     const first = await claimLocalIndexBatch(id, 0, single ? 1 : 2, firstFiles, prepared.uploadId);
-    const delta = await indexLocalBatch(id, `local/${fixture}`, org.id, firstFiles);
+    const delta = await indexLocalBatch(id, `local/${fixture}`, org.id, firstFiles, first.attemptId);
     const progress = { indexedFiles: delta.indexedInBatch, totalChunks: delta.chunksInBatch, totalVectors: delta.chunksInBatch };
     await recordLocalIndexProgress(id, Date.now(), progress, single, first);
     if (scenario === "local-gap") {

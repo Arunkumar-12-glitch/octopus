@@ -57,6 +57,7 @@ export async function indexLocalBatch(
   fullName: string,
   organizationId: string,
   files: LocalFile[],
+  indexAttemptId: string,
   ig?: Ignore,
 ): Promise<IndexLocalBatchResult> {
   let indexed = 0;
@@ -141,7 +142,7 @@ export async function indexLocalBatch(
     },
   }));
 
-  await upsertChunks(points);
+  await upsertChunks(points, { repoId, indexAttemptId });
 
   return { indexedInBatch: indexed, skippedInBatch: skipped, chunksInBatch: points.length };
 }
@@ -224,7 +225,7 @@ export async function prepareRepoForLocalIndex(
       return { ok: false, reason: "in-flight", repoId: existing.id };
     }
     // We hold the claim now — safe to wipe chunks without racing another run.
-    await deleteRepoChunks(existing.id);
+    await deleteRepoChunks({ repoId: existing.id, uploadId: uploadState.id });
     return { ok: true, repoId: existing.id, reIndex: true, uploadId: uploadState.id };
   }
 

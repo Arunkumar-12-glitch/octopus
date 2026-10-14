@@ -42,7 +42,7 @@ mock.module("@/lib/forgejo", () => ({
 }));
 mock.module("@/lib/qdrant", () => ({
   ensureCollection: async () => {},
-  deleteRepoChunks: async (id: string) => { deleted.push(id); },
+  deleteRepoChunks: async (owner: { repoId: string; indexAttemptId: string }) => { assert.equal(owner.indexAttemptId, "attempt-1"); deleted.push(owner.repoId); },
   deleteRepoFileChunks: async () => {},
   upsertChunks: async () => { afterUpsert?.(); },
 }));
@@ -65,7 +65,7 @@ globalThis.fetch = mock(async (input: string | URL | Request) => {
 }) as typeof fetch;
 
 async function run(branch = "main") {
-  return indexRepository("repo-1", "acme/new", branch, 123);
+  return indexRepository({ repoId: "repo-1", indexAttemptId: "attempt-1" }, "acme/new", branch, 123);
 }
 function reset() {
   responses.clear(); requests.length = 0; deleted.length = 0; embedded.length = 0;
@@ -144,12 +144,12 @@ assert.equal(embedded.length, 1);
 console.log("14 indexing regressions passed");
 
 reset();
-const forgejoResult = await indexRepository("repo-1", "acme/new", "main", 0, undefined, undefined, "forgejo", "org-1");
+const forgejoResult = await indexRepository({ repoId: "repo-1", indexAttemptId: "attempt-1" }, "acme/new", "main", 0, undefined, undefined, "forgejo", "org-1");
 assert.equal(forgejoResult.indexedFiles, 1);
 assert.equal(forgejoResult.totalFiles, 4, "inventory includes files skipped by indexing limits and ignore rules");
 assert.equal(requests.length, 0, "Forgejo must use its validated transport instead of GitHub or git clone");
 reset(); forgejoFailure = true;
-await assert.rejects(indexRepository("repo-1", "acme/new", "main", 0, undefined, undefined, "forgejo", "org-1"), /Forgejo unavailable/);
+await assert.rejects(indexRepository({ repoId: "repo-1", indexAttemptId: "attempt-1" }, "acme/new", "main", 0, undefined, undefined, "forgejo", "org-1"), /Forgejo unavailable/);
 assert.equal(deleted.length, 0, "failed fetch must preserve the prior index");
 
 // Incomplete snapshots must fail before replacing the previous searchable data.
@@ -179,7 +179,7 @@ await assert.rejects(run, /embedding results/);
 invalidEmbeddings = false;
 const controller = new AbortController();
 afterUpsert = () => controller.abort(new Error("Indexing cancelled"));
-await assert.rejects(() => indexRepository("repo-1", "acme/new", "main", 123, undefined, controller.signal), /Indexing cancelled/);
+await assert.rejects(() => indexRepository({ repoId: "repo-1", indexAttemptId: "attempt-1" }, "acme/new", "main", 123, undefined, controller.signal), /Indexing cancelled/);
 afterUpsert = undefined;
 console.log("Incomplete tree, file failure, embedding failure and late cancellation regressions passed");
 
@@ -192,9 +192,9 @@ responses.set("/git/trees/main?recursive=1", [200, { tree: [
   { path: "ignored.ts", type: "blob", sha: "ignored" },
 ] }]);
 responses.set("/git/blobs/good", [200, { encoding: "base64", content: Buffer.from("export const good = 1;").toString("base64") }]);
-const tokenResult = await indexRepository("repo-1", "acme/new", "main", 0, undefined, undefined, "github", "org-1", suppliedToken);
+const tokenResult = await indexRepository({ repoId: "repo-1", indexAttemptId: "attempt-1" }, "acme/new", "main", 0, undefined, undefined, "github", "org-1", suppliedToken);
 assert.equal(tokenResult.indexedFiles, 1);
 assert.ok(tokenResult.totalVectors > 0);
 assert.ok(!requests.some(url => url.endsWith("/git/blobs/ignored")));
 ignoreContent = null;
-await assert.rejects(() => indexRepository("repo-1", "acme/new", "main", 0, undefined, undefined, "github", "org-1", suppliedToken), /could not read .octopusignore/);
+await assert.rejects(() => indexRepository({ repoId: "repo-1", indexAttemptId: "attempt-1" }, "acme/new", "main", 0, undefined, undefined, "github", "org-1", suppliedToken), /could not read .octopusignore/);

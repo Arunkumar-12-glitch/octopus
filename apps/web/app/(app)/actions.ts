@@ -11,6 +11,7 @@ import { randomUUID } from "node:crypto";
 import { prisma } from "@octopus/db";
 import { hasOrgPermission } from "@/lib/org-permissions";
 import { pubby } from "@/lib/pubby";
+import { notifyRepositoryIndex } from "@/lib/repository-index-notifications";
 import { writeSyncLog, deleteSyncLogs } from "@/lib/elasticsearch";
 import { GithubRateLimitError } from "@/lib/github";
 import { syncOrgRepos } from "@/lib/repo-sync";
@@ -688,7 +689,7 @@ export async function indexRepository(repoId: string): Promise<{ error?: string 
       message,
       level,
       timestamp,
-    });
+    }).catch(error => console.warn("[repository-index] log notification failed:", error));
     writeSyncLog({
       orgId: repo.organizationId,
       repoId: repo.id,
@@ -767,10 +768,7 @@ export async function cancelIndexing(repoId: string): Promise<{ error?: string }
   if (!cancelled.count) return { error: "Indexing attempt is no longer current." };
   if (repo.indexAttemptId) abortIndexing(repo.indexAttemptId);
   revalidatePath("/repositories");
-  pubby.trigger(`presence-org-${repo.organizationId}`, "index-status", {
-    repoId,
-    status: "cancelled",
-  });
+  void notifyRepositoryIndex(`presence-org-${repo.organizationId}`, repoId);
 
   return {};
 }

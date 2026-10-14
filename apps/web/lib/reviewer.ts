@@ -3,6 +3,7 @@ import { runRepositoryIndex, SupersededIndexError } from "@/lib/repository-index
 import crypto from "node:crypto";
 import { prisma, type Prisma } from "@octopus/db";
 import { pubby } from "@/lib/pubby";
+import { notifyRepositoryIndex } from "@/lib/repository-index-notifications";
 import {
   searchSimilarChunks,
   searchKnowledgeChunks,
@@ -1038,19 +1039,15 @@ async function processReviewInternal(pullRequestId: string, executionWindow?: Re
 
           await deleteSyncLogs(org.id, repo.id);
 
-          pubby.trigger(indexChannel, "index-status", {
-            repoId: repo.id,
-            status: "indexing",
-          }).catch((err) => console.error("[reviewer] Pubby index-status trigger failed:", err));
+          void notifyRepositoryIndex(indexChannel, repo.id);
 
           return indexRepository(
-            repo.id, repo.fullName, repo.defaultBranch, installationId ?? 0,
+            { repoId: repo.id, indexAttemptId }, repo.fullName, repo.defaultBranch, installationId ?? 0,
             emitIndexLog, undefined, repo.provider, repo.organizationId,
           );
         }).catch(async error => {
           if (!(error instanceof SupersededIndexError)) {
-            await pubby.trigger(indexChannel, "index-status", { repoId: repo.id, status: "failed" })
-              .catch(e => console.error("[reviewer] Pubby index-status failed trigger failed:", e));
+            void notifyRepositoryIndex(indexChannel, repo.id);
           }
           throw error;
         });
@@ -1063,10 +1060,7 @@ async function processReviewInternal(pullRequestId: string, executionWindow?: Re
 
         emitIndexLog(`Indexing complete: ${indexStats.indexedFiles} files, ${indexStats.totalVectors} vectors`, "success");
 
-        pubby.trigger(indexChannel, "index-status", {
-          repoId: repo.id,
-          status: "indexed",
-        }).catch((err) => console.error("[reviewer] Pubby index-status trigger failed:", err));
+        void notifyRepositoryIndex(indexChannel, repo.id);
 
         console.log(`[reviewer] Indexing complete: ${indexStats.indexedFiles} files, ${indexStats.totalVectors} vectors`);
 

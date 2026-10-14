@@ -88,7 +88,7 @@ export async function POST(
       message,
       level,
       timestamp,
-    });
+    }).catch(error => console.warn("[repository-index] log notification failed:", error));
     writeSyncLog({
       orgId: repo.organizationId,
       repoId: repo.id,

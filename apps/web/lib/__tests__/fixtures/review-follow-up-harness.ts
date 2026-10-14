@@ -278,7 +278,7 @@ mock.module("@/lib/queue", () => ({
   enqueue: async () => {}, enqueueAfter: async () => {},
 }));
 mock.module("@/lib/cost", () => ({ getOrgSpendLimitStatus: async () => ({ blocked: false }), shouldGuardConcurrency: async () => false }));
-mock.module("@/lib/pubby", () => ({ pubby: { trigger: async (_channel: string, _name: string, data: { status?: string }) => { events.push({ ...data, eventName: _name }); } } }));
+mock.module("@/lib/pubby", () => ({ pubby: { trigger: async (_channel: string, _name: string, data: { status?: string }) => { events.push({ ...data, status: _name === "index-status" ? repo.indexStatus : data.status, eventName: _name }); } } }));
 mock.module("@/lib/events", () => ({ eventBus: { emit: (event: { type: string }) => { events.push(event); } } }));
 mock.module("@/lib/indexer", () => ({ indexRepository: async () => {
   if (!preserveAutoReview) throw new Error("unexpected indexing");

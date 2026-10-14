@@ -125,7 +125,7 @@ export async function processCommunityReview(jobId: string): Promise<void> {
             await prisma.communityReviewJob.update({ where: { id: jobId }, data: { status: "indexing" } });
             LOG(jobId, "indexing repository...");
             return indexRepository(
-              repo.id, fullName, repo.defaultBranch, 0,
+              { repoId: repo.id, indexAttemptId }, fullName, repo.defaultBranch, 0,
               (msg, level) => LOG(jobId, `[index] ${level ?? "info"}: ${msg}`),
               undefined, "github", job.organizationId, githubToken,
             );

@@ -7,6 +7,10 @@ export class SupersededIndexError extends Error {
   constructor() { super("Indexing attempt is no longer current"); }
 }
 
+export function isIndexingCancelled(signal?: AbortSignal): boolean {
+  return !!signal?.aborted && signal.reason?.name !== "TimeoutError";
+}
+
 /** Persist a complete snapshot and its milestones in one guarded transaction. */
 export async function runRepositoryIndex(
   repositoryId: string,
@@ -52,7 +56,7 @@ export async function runRepositoryIndex(
   } catch (error) {
     // Never let an expired worker overwrite its replacement's state.
     const released = await prisma.repository.updateMany({ where, data: {
-      indexStatus: signal?.aborted ? "pending" : "failed",
+      indexStatus: isIndexingCancelled(signal) ? "pending" : "failed",
     } });
     if (!released.count) throw new SupersededIndexError();
     throw error;

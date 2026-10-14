@@ -224,7 +224,7 @@ for (const missingPath of ["missing.ts", ".octopusignore"]) {
     ...(missingPath === "missing.ts" ? [{ body: { type: "file", encoding: "base64", content: Buffer.from("export const good = 1;").toString("base64") } }] : []),
     { status: 404, body: { message: "Not Found" } },
   ];
-  await assert.rejects(() => indexRepository("repo-fixture", "team/repo", "main", 0, undefined, undefined, "forgejo", "org-fixture"), http.ForgejoHttpError);
+  await assert.rejects(() => indexRepository({ repoId: "repo-fixture", indexAttemptId: "attempt-fixture" }, "team/repo", "main", 0, undefined, undefined, "forgejo", "org-fixture"), http.ForgejoHttpError);
   assert.equal(replies.length, 0);
   assert.equal(vectorWrites, 0);
 }

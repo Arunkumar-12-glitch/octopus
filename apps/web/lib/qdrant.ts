@@ -1,3 +1,5 @@
+import "server-only";
+import type { RepositoryIndexOwner } from "@/lib/repository-index-storage";
 import { createHash } from "crypto";
 import { QdrantClient } from "@qdrant/js-client-rest";
 import { generateSparseVector } from "@/lib/sparse-vector";
@@ -168,7 +170,10 @@ export async function upsertChunks(
     payload: Record<string, unknown>;
     sparseVector?: { indices: number[]; values: number[] };
   }[],
+  owner: RepositoryIndexOwner,
 ) {
+  const { withRepositoryIndexStorage } = await import("@/lib/repository-index-storage");
+  if (points.some(point => point.payload.repoId !== owner.repoId)) throw new Error("Index points must belong to the claimed repository");
   // createEmbeddings returns [] for points whose org is over its spend limit;
   // qdrant rejects dim=0 dense vectors, so drop those points before sending.
   const originalCount = points.length;
@@ -188,41 +193,47 @@ export async function upsertChunks(
         : p.vector,
       payload: p.payload,
     }));
-    try {
-      await withQdrantRetry(() => qdrant.upsert(COLLECTION_NAME, { points: batch }), `upsert ${COLLECTION_NAME}`);
-    } catch (error) {
-      if (!isSparseVectorError(error)) throw error;
-      console.warn("[qdrant] Falling back to dense-only upsert", { collection: COLLECTION_NAME, error: error instanceof Error ? error.message : error });
-      const denseBatch = slice.map((p) => ({
-        id: p.id,
-        vector: p.vector,
-        payload: p.payload,
-      }));
-      await withQdrantRetry(() => qdrant.upsert(COLLECTION_NAME, { points: denseBatch }), `upsert ${COLLECTION_NAME} dense`);
-    }
+    await withRepositoryIndexStorage(owner, async () => {
+      try {
+        await withQdrantRetry(() => qdrant.upsert(COLLECTION_NAME, { points: batch, wait: true }), `upsert ${COLLECTION_NAME}`);
+      } catch (error) {
+        if (!isSparseVectorError(error)) throw error;
+        console.warn("[qdrant] Falling back to dense-only upsert", { collection: COLLECTION_NAME, error: error instanceof Error ? error.message : error });
+        const denseBatch = slice.map((p) => ({
+          id: p.id,
+          vector: p.vector,
+          payload: p.payload,
+        }));
+        await withQdrantRetry(() => qdrant.upsert(COLLECTION_NAME, { points: denseBatch, wait: true }), `upsert ${COLLECTION_NAME} dense`);
+      }
+    });
   }
 }
 
-export async function deleteRepoChunks(repoId: string) {
+export async function deleteRepoChunks(owner: RepositoryIndexOwner) {
+  const { withRepositoryIndexStorage } = await import("@/lib/repository-index-storage");
   const qdrant = getQdrantClient();
-  await qdrant.delete(COLLECTION_NAME, {
+  await withRepositoryIndexStorage(owner, () => qdrant.delete(COLLECTION_NAME, {
+    wait: true,
     filter: {
-      must: [{ key: "repoId", match: { value: repoId } }],
+      must: [{ key: "repoId", match: { value: owner.repoId } }],
     },
-  });
+  }));
 }
 
-export async function deleteRepoFileChunks(repoId: string, filePaths: string[]) {
+export async function deleteRepoFileChunks(owner: RepositoryIndexOwner, filePaths: string[]) {
   if (filePaths.length === 0) return;
+  const { withRepositoryIndexStorage } = await import("@/lib/repository-index-storage");
   const qdrant = getQdrantClient();
-  await qdrant.delete(COLLECTION_NAME, {
+  await withRepositoryIndexStorage(owner, () => qdrant.delete(COLLECTION_NAME, {
+    wait: true,
     filter: {
       must: [
-        { key: "repoId", match: { value: repoId } },
+        { key: "repoId", match: { value: owner.repoId } },
         { key: "filePath", match: { any: filePaths } },
       ],
     },
-  });
+  }));
 }
 
 export async function getRepoChunks(
@@ -401,6 +412,7 @@ export async function upsertKnowledgeChunks(
     payload: Record<string, unknown>;
     sparseVector?: { indices: number[]; values: number[] };
   }[],
+  owner: RepositoryIndexOwner,
 ) {
   // createEmbeddings returns [] for points whose org is over its spend limit;
   // qdrant rejects dim=0 dense vectors, so drop those points before sending.
@@ -567,6 +579,7 @@ export async function upsertReviewChunks(
     payload: Record<string, unknown>;
     sparseVector?: { indices: number[]; values: number[] };
   }[],
+  owner: RepositoryIndexOwner,
 ) {
   // createEmbeddings returns [] for points whose org is over its spend limit;
   // qdrant rejects dim=0 dense vectors, so drop those points before sending.
@@ -1129,6 +1142,7 @@ export async function upsertDocsChunks(
     payload: Record<string, unknown>;
     sparseVector?: { indices: number[]; values: number[] };
   }[],
+  owner: RepositoryIndexOwner,
 ) {
   // createEmbeddings returns [] for points whose org is over its spend limit;
   // qdrant rejects dim=0 dense vectors, so drop those points before sending.

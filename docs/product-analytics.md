@@ -66,6 +66,14 @@ reviewing a first PR, but does not set this milestone. Incremental updates canno
 establish a first full index: they leave a null `indexedAt` unchanged until a
 usable full index completes, and refresh only an existing non-null `indexedAt`.
 
+Storage writes and deletes hold the repository row lock until Qdrant confirms
+completion. Cancellation and replacement claims wait for in-flight requests;
+each later storage batch rechecks its attempt or upload identity under that lock.
+Incremental writes are bound to the indexed snapshot they started from. Queue
+timeouts persist as failures, while user cancellations return to pending.
+Optional status notifications invalidate client data; displays reload persisted
+state so a delayed event cannot overwrite a replacement's status.
+
 For local uploads, the server validates ordered batches, unique paths and the
 declared file count. The first response returns `uploadId`; send it unchanged
 with every later batch to bind the upload to the same attempt. A complete,

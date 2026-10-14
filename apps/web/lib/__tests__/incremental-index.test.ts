@@ -58,6 +58,8 @@ mock.module("@/lib/octopus-ignore", () => ({
 // import after the mocks fixes the ordering (same as ai-router.test.ts).
 const { incrementalIndex } = await import("@/lib/indexer");
 
+const indexOwner = { repoId: "repo-1", updatedAt: new Date(0) };
+
 // ── Tests ──
 
 describe("incrementalIndex", () => {
@@ -78,7 +80,7 @@ describe("incrementalIndex", () => {
 
   it("deletes old chunks and indexes modified files", async () => {
     const result = await incrementalIndex(
-      "repo-1",
+      indexOwner,
       "owner/repo",
       "main",
       12345,
@@ -92,7 +94,7 @@ describe("incrementalIndex", () => {
     // Should delete chunks for changed files
     expect(mockDeleteRepoFileChunks).toHaveBeenCalledTimes(1);
     const deleteArgs = mockDeleteRepoFileChunks.mock.calls[0];
-    expect(deleteArgs[0]).toBe("repo-1");
+    expect(deleteArgs[0]).toEqual(indexOwner);
     expect(deleteArgs[1]).toEqual(["src/index.ts", "src/utils.ts"]);
 
     // Should upsert new chunks
@@ -114,7 +116,7 @@ describe("incrementalIndex", () => {
 
   it("handles removed files without fetching content", async () => {
     const result = await incrementalIndex(
-      "repo-1",
+      indexOwner,
       "owner/repo",
       "main",
       12345,
@@ -139,7 +141,7 @@ describe("incrementalIndex", () => {
 
   it("handles mix of added, modified, removed, and renamed files", async () => {
     const result = await incrementalIndex(
-      "repo-1",
+      indexOwner,
       "owner/repo",
       "main",
       12345,
@@ -167,7 +169,7 @@ describe("incrementalIndex", () => {
 
   it("skips non-indexable file types", async () => {
     const result = await incrementalIndex(
-      "repo-1",
+      indexOwner,
       "owner/repo",
       "main",
       12345,
@@ -185,7 +187,7 @@ describe("incrementalIndex", () => {
 
   it("returns zero vectors when no files changed", async () => {
     const result = await incrementalIndex(
-      "repo-1",
+      indexOwner,
       "owner/repo",
       "main",
       12345,
@@ -209,7 +211,7 @@ describe("incrementalIndex", () => {
     });
 
     const result = await incrementalIndex(
-      "repo-1",
+      indexOwner,
       "owner/repo",
       "main",
       12345,
@@ -232,7 +234,7 @@ describe("incrementalIndex", () => {
     });
 
     const result = await incrementalIndex(
-      "repo-1",
+      indexOwner,
       "owner/repo",
       "main",
       12345,
@@ -256,7 +258,7 @@ describe("incrementalIndex", () => {
     }));
 
     const result = await incrementalIndex(
-      "repo-1",
+      indexOwner,
       "owner/repo",
       "main",
       12345,
@@ -281,7 +283,7 @@ describe("incrementalIndex", () => {
 
   it("sets correct payload fields on upserted points", async () => {
     await incrementalIndex(
-      "repo-1",
+      indexOwner,
       "owner/repo",
       "main",
       12345,

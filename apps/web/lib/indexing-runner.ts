@@ -1,7 +1,7 @@
 import "server-only";
-import { runRepositoryIndex, SupersededIndexError } from "@/lib/repository-index-completion";
+import { runRepositoryIndex, SupersededIndexError, isIndexingCancelled } from "@/lib/repository-index-completion";
 import { prisma } from "@octopus/db";
-import { pubby } from "@/lib/pubby";
+import { notifyRepositoryIndex } from "@/lib/repository-index-notifications";
 import { clearAbortController } from "@/lib/indexing-abort";
 import { eventBus } from "@/lib/events";
 import type { LogLevel } from "@/lib/indexer";
@@ -21,10 +21,10 @@ export async function runIndexingInBackground(
   try {
     const stats = await runRepositoryIndex(repoId, indexAttemptId, async () => {
       const { indexRepository: runIndexing } = await import("@/lib/indexer");
-      await pubby.trigger(channel, "index-status", { repoId, status: "indexing" });
+      void notifyRepositoryIndex(channel, repoId);
       emitLog(`Starting indexing for ${fullName}...`);
       return runIndexing(
-        repoId, fullName, defaultBranch, installationId, emitLog,
+        { repoId, indexAttemptId }, fullName, defaultBranch, installationId, emitLog,
         abortController.signal, provider, organizationId,
       );
     }, abortController.signal);
@@ -63,27 +63,20 @@ export async function runIndexingInBackground(
       durationMs: stats.durationMs,
     });
 
-    pubby.trigger(channel, "index-status", {
-      repoId,
-      status: "indexed",
-    });
+    void notifyRepositoryIndex(channel, repoId);
   } catch (error) {
     clearAbortController(indexAttemptId);
     if (error instanceof SupersededIndexError) return;
 
     const errorMsg = error instanceof Error ? error.message : "Unknown error";
-    const isCancelled = abortController.signal.aborted || errorMsg === "Indexing cancelled";
+    const isCancelled = isIndexingCancelled(abortController.signal);
 
     console.error(`Failed to index repo ${fullName}:`, error);
 
     if (isCancelled) {
       emitLog("Indexing cancelled by user", "warning");
-      pubby.trigger(channel, "index-status", {
-        repoId,
-        status: "cancelled",
-      });
+      void notifyRepositoryIndex(channel, repoId);
     } else {
-      const needsAccess = errorMsg.includes("does not have access");
       emitLog(`Indexing failed: ${errorMsg}`, "error");
       eventBus.emit({
         type: "repo-indexed",
@@ -92,11 +85,7 @@ export async function runIndexingInBackground(
         success: false,
         error: errorMsg,
       });
-      pubby.trigger(channel, "index-status", {
-        repoId,
-        status: "failed",
-        needsAccess,
-      });
+      void notifyRepositoryIndex(channel, repoId);
     }
   }
 }

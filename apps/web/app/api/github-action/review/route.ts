@@ -258,7 +258,7 @@ export async function POST(request: NextRequest) {
       });
       if (!claim.count) throw new Error("Repository indexing is already in progress");
       await runRepositoryIndex(repo.id, indexAttemptId, () => indexRepository(
-        repo.id, fullName, ghRepoInfo.defaultBranch, 0, () => {},
+        { repoId: repo.id, indexAttemptId }, fullName, ghRepoInfo.defaultBranch, 0, () => {},
         undefined, "github", orgId, githubToken,
       ));
 
