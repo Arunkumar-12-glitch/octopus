@@ -6,6 +6,7 @@ const cases = [
   "first", "reindex", "legacy", "concurrent-earlier-first", "concurrent-later-first",
   "migration", "failed", "cancelled", "background", "queued", "local", "local-nonfinal",
   "community", "reviewer", "action", "incremental",
+  "timezone-utc", "timezone-berlin",
 ] as const;
 
 (enabled ? describe : describe.skip)("repository index completion with PostgreSQL", () => {

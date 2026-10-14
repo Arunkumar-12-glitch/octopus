@@ -7,6 +7,13 @@ import ts from "typescript";
 const url = new URL(process.env.DATABASE_URL ?? "http://invalid");
 assert.ok(["localhost", "127.0.0.1", "[::1]"].includes(url.hostname));
 assert.match(url.pathname, /(^|[-_])test($|[-_])/);
+const scenario = process.argv[2];
+const sessionTimezone = scenario === "timezone-berlin" ? "Europe/Berlin" : "UTC";
+if (scenario.startsWith("timezone-")) {
+  // Apply to every pooled connection, including the helper's UPDATE connection.
+  url.searchParams.set("options", `-c timezone=${sessionTimezone}`);
+  process.env.DATABASE_URL = url.toString();
+}
 mock.module("server-only", () => ({}));
 const { prisma } = await import("@octopus/db");
 const { recordRepositoryIndexCompletion } = await import("@/lib/repository-index-completion");
@@ -14,7 +21,6 @@ const migration = await readFile(new URL(
   "../../../../../packages/db/prisma/migrations/20261014120000_add_repository_first_indexed_at/migration.sql",
   import.meta.url,
 ), "utf8");
-const scenario = process.argv[2];
 const early = new Date("2026-01-01T12:00:00.123Z");
 const late = new Date("2026-01-02T12:00:00.456Z");
 const fixture = randomUUID();
@@ -27,7 +33,18 @@ const stats = { totalFiles: 2, indexedFiles: 1, totalChunks: 1, totalVectors: 1,
   contributors: [], contributorCount: 0, durationMs: 10 };
 
 try {
-  if (scenario === "migration") {
+  if (scenario.startsWith("timezone-")) {
+    const session = await prisma.$queryRaw<Array<{ TimeZone: string }>>`SHOW TimeZone`;
+    assert.equal(session[0].TimeZone, sessionTimezone);
+    const completedAt = new Date("2026-07-01T12:34:56.789Z");
+    await recordRepositoryIndexCompletion(repo.id, completedAt);
+    const rows = await prisma.$queryRaw<Array<{ indexedAt: string; firstIndexedAt: string; updatedAt: string }>>`
+      SELECT "indexedAt"::text AS "indexedAt", "firstIndexedAt"::text AS "firstIndexedAt",
+        "updatedAt"::text AS "updatedAt" FROM repositories WHERE id = ${repo.id}
+    `;
+    const expected = completedAt.toISOString().replace("T", " ").slice(0, -1);
+    assert.deepEqual(rows, [{ indexedAt: expected, firstIndexedAt: expected, updatedAt: expected }]);
+  } else if (scenario === "migration") {
     await prisma.$transaction(async tx => {
       const schema = `index_migration_${fixture.replaceAll("-", "")}`;
       await tx.$executeRawUnsafe(`CREATE SCHEMA "${schema}"`);

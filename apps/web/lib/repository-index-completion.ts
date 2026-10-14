@@ -15,7 +15,7 @@ export async function recordRepositoryIndexCompletion(
           ELSE NULL
         END,
         "indexedAt" = ${completedAt}::timestamp,
-        "updatedAt" = CURRENT_TIMESTAMP
+        "updatedAt" = ${completedAt}::timestamp
     WHERE "id" = ${repositoryId}
   `;
 }
