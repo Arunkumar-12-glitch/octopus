@@ -89,13 +89,13 @@ export async function indexRepository(
       totalFileCount = paths.length;
       emptyRepository = paths.length === 0;
       const ig = paths.includes(".octopusignore")
-        ? parseOctopusIgnore(await forgejoLib.getFileContent(organizationId, fullName, head, ".octopusignore"))
+        ? parseOctopusIgnore(await forgejoLib.getFileContent(organizationId, fullName, head, ".octopusignore", { strict: true }))
         : undefined;
       for (const filePath of paths.filter(p => shouldIndex(p, undefined, ig))) {
         signal?.throwIfAborted();
         let content: string;
         try {
-          content = await forgejoLib.getFileContent(organizationId, fullName, head, filePath);
+          content = await forgejoLib.getFileContent(organizationId, fullName, head, filePath, { strict: true });
         } catch (error) {
           if (!(error instanceof ForgejoResponseTooLargeError)) throw error;
           skipped++;
@@ -357,7 +357,7 @@ export async function indexRepository(
     if (ignoreBlob) {
       try {
         const [owner, repoName] = fullName.split("/");
-        const ignoreContent = await ghGetFileContent(installationId, owner, repoName, activeBranch, ".octopusignore");
+        const ignoreContent = await ghGetFileContent(installationId, owner, repoName, activeBranch, ".octopusignore", token);
         if (ignoreContent === null) throw new Error("Missing .octopusignore content");
         if (ignoreContent) {
           ig = parseOctopusIgnore(ignoreContent);

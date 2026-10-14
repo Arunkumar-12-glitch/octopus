@@ -1,6 +1,6 @@
 import { mock } from "bun:test";
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHmac } from "node:crypto";
 import { readFile } from "node:fs/promises";
 
 const url = new URL(process.env.DATABASE_URL ?? "http://invalid");
@@ -25,9 +25,14 @@ const early = new Date("2026-01-01T12:00:00.123Z");
 const late = new Date("2026-01-02T12:00:00.456Z");
 const fixture = randomUUID();
 const org = await prisma.organization.create({ data: { name: "Index completion test", slug: `index-test-${fixture}` } });
+let indexAttemptId = randomUUID();
 const repo = await prisma.repository.create({ data: {
-  organizationId: org.id, name: "Index test", fullName: "fixture/index", externalId: fixture, indexStatus: "indexing",
+  organizationId: org.id, name: "Index test", fullName: "fixture/index", externalId: fixture, indexStatus: "indexing", indexAttemptId,
 } });
+const claim = async () => {
+  indexAttemptId = randomUUID();
+  await prisma.repository.update({ where: { id: repo.id }, data: { indexStatus: "indexing", indexAttemptId } });
+};
 const snapshot = () => prisma.repository.findUniqueOrThrow({ where: { id: repo.id } });
 const stats = { totalFiles: 2, indexedFiles: 1, totalChunks: 1, totalVectors: 1,
   contributors: [], contributorCount: 0, durationMs: 10 };
@@ -108,37 +113,48 @@ try {
     const result = await snapshot();
     assert.deepEqual(result.firstIndexedAt, early);
     assert.deepEqual(result.indexedAt, times[1]);
-  } else if (["failed", "cancelled", "background", "late-cancel", "empty", "superseded"].includes(scenario)) {
+  } else if (["failed", "cancelled", "background", "late-cancel", "empty", "superseded", "background-replacement", "background-setup-failure"].includes(scenario)) {
     const controller = new AbortController();
+    const notifications: string[] = [];
     mock.module("@/lib/indexer", () => ({ indexRepository: async () => {
+      if (scenario === "background-replacement") {
+        await claim();
+        throw new Error("Cancelled worker failed after restart");
+      }
       if (scenario === "failed") throw new Error("Index fixture failed");
       if (scenario === "cancelled") { controller.abort(); throw new Error("Indexing cancelled"); }
       if (scenario === "late-cancel") controller.abort();
       if (scenario === "superseded") await prisma.repository.update({ where: { id: repo.id }, data: { indexStatus: "pending", indexAttemptId: null } });
       return scenario === "empty" ? { ...stats, indexedFiles: 0, totalChunks: 0, totalVectors: 0 } : stats;
     } }));
-    mock.module("@/lib/pubby", () => ({ pubby: { trigger: async () => {} } }));
+    mock.module("@/lib/pubby", () => ({ pubby: { trigger: async (_channel: string, _event: string, data: { status: string }) => {
+      if (scenario === "background-setup-failure" && data.status === "indexing") throw new Error("Setup notification failed");
+      notifications.push(data.status);
+    } } }));
     mock.module("@/lib/events", () => ({ eventBus: { emit: () => {} } }));
     mock.module("@/lib/summarizer", () => ({ summarizeRepository: async () => ({ summary: "Fixture", purpose: "Fixture" }) }));
     mock.module("@/lib/indexing-abort", () => ({ clearAbortController: () => {} }));
     const { runIndexingInBackground } = await import("@/lib/indexing-runner");
-    await runIndexingInBackground(repo.id, repo.fullName, "main", org.id, 0, "fixture", () => {}, controller);
+    await runIndexingInBackground(repo.id, repo.fullName, "main", org.id, 0, "fixture", () => {}, controller, indexAttemptId);
     const result = await snapshot();
     assert.equal(result.firstIndexedAt !== null, scenario === "background");
     assert.equal(result.indexedAt !== null, scenario === "background");
     if (scenario === "superseded") assert.equal(result.indexStatus, "pending");
+    if (["superseded", "background-replacement"].includes(scenario)) assert.deepEqual(notifications, ["indexing"]);
+    if (scenario === "background-replacement") assert.equal(result.indexStatus, "indexing");
+    if (scenario === "background-setup-failure") assert.equal(result.indexStatus, "failed");
   } else if (scenario === "empty-then-content" || scenario === "failed-reindex") {
     const emptyStats = { ...stats, indexedFiles: 0, totalChunks: 0, totalVectors: 0 };
-    await runRepositoryIndex(repo.id, async () => scenario === "empty-then-content" ? emptyStats : stats);
+    await runRepositoryIndex(repo.id, indexAttemptId, async () => scenario === "empty-then-content" ? emptyStats : stats);
     const first = await snapshot();
-    await prisma.repository.update({ where: { id: repo.id }, data: { indexStatus: "indexing" } });
+    await claim();
     if (scenario === "empty-then-content") {
       assert.equal(first.firstIndexedAt, null);
       assert.equal(first.indexedAt, null);
-      await runRepositoryIndex(repo.id, async () => stats);
+      await runRepositoryIndex(repo.id, indexAttemptId, async () => stats);
       assert.ok((await snapshot()).firstIndexedAt);
     } else {
-      await assert.rejects(() => runRepositoryIndex(repo.id, async () => { throw new Error("Read failed"); }), /Read failed/);
+      await assert.rejects(() => runRepositoryIndex(repo.id, indexAttemptId, async () => { throw new Error("Read failed"); }), /Read failed/);
       assert.deepEqual((await snapshot()).firstIndexedAt, first.firstIndexedAt);
       assert.deepEqual((await snapshot()).indexedAt, first.indexedAt);
     }
@@ -147,11 +163,11 @@ try {
     let began!: () => void;
     const ready = new Promise<void>(resolve => { began = resolve; });
     const pending = new Promise<void>(resolve => { finish = resolve; });
-    const old = runRepositoryIndex(repo.id, async () => { began(); await pending; return stats; });
+    const old = runRepositoryIndex(repo.id, indexAttemptId, async () => { began(); await pending; return stats; });
     const observed = old.then(() => null, error => error);
     await ready;
-    await prisma.repository.update({ where: { id: repo.id }, data: { indexStatus: "indexing", indexAttemptId: null } });
-    await runRepositoryIndex(repo.id, async () => ({ ...stats, indexedFiles: 2 }));
+    await claim();
+    await runRepositoryIndex(repo.id, indexAttemptId, async () => ({ ...stats, indexedFiles: 2 }));
     const completed = await snapshot();
     finish();
     assert.match(String(await observed), /no longer current/);
@@ -159,6 +175,106 @@ try {
     assert.deepEqual(after.firstIndexedAt, completed.firstIndexedAt);
     assert.equal(after.indexStatus, "indexed");
     assert.equal(after.indexedFiles, 2);
+  } else if (scenario === "actions" || scenario === "community") {
+    await prisma.repository.update({ where: { id: repo.id }, data: { indexStatus: "pending" } });
+    let calls = 0;
+    mock.module("@/lib/indexer", () => ({ indexRepository: async (...args: unknown[]) => {
+      calls++;
+      assert.equal(args[0], repo.id);
+      assert.equal(args[3], 0);
+      assert.equal(args[8], "fixture-token");
+      assert.ok((await snapshot()).indexAttemptId);
+      return stats;
+    } }));
+    mock.module("@/lib/api-auth", () => ({ authenticateApiToken: async () => ({ org }) }));
+    mock.module("@/lib/cost", () => ({ isOrgOverSpendLimit: async () => false }));
+    mock.module("@/lib/review-core", () => ({ generateLocalReview: async () => ({ findings: [], summary: "Fixture", model: "fixture" }) }));
+    mock.module("@/lib/summarizer", () => ({ summarizeRepository: async () => ({ summary: "Fixture", purpose: "Fixture" }) }));
+    mock.module("@/lib/analyzer", () => ({ analyzeRepository: async () => "Fixture" }));
+    mock.module("@/lib/github", () => ({ getRepositoryTree: async () => [], getPullRequestDiff: async () => "" }));
+    mock.module("@/lib/events/bus", () => ({ eventBus: { emit: () => {} } }));
+    mock.module("@/lib/queue", () => ({ enqueue: async () => "fixture" }));
+    mock.module("@/lib/community-pr-persist", () => ({ persistCommunityReviewToPR: async () => {} }));
+    mock.module("@/lib/crypto", () => ({ encryptString: (text: string) => text, decryptString: (text: string) => text }));
+    mock.module("@/lib/oss-bot", () => ({ getBotToken: () => "fixture-token" }));
+    mock.module("@/lib/oss-review-post", () => ({ postOssReview: async () => ({ posted: 0, skipped: 0 }) }));
+    const diff = "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-old\n+new\n";
+    if (scenario === "actions") {
+      globalThis.fetch = (async () => Response.json({ id: fixture, default_branch: "main", private: false, full_name: repo.fullName })) as typeof fetch;
+      const { POST } = await import("@/app/api/github-action/review/route");
+      const response = await POST(new Request("https://fixture.invalid/api/github-action/review", {
+        method: "POST", headers: { "x-octopus-action-secret": process.env.OCTOPUS_ACTION_SECRET ?? "" },
+        body: JSON.stringify({ owner: "fixture", repo: "index", githubToken: "fixture-token", diff }),
+      }) as never);
+      assert.equal(response.status, 200);
+      assert.equal((await response.json()).indexed, true);
+    } else {
+      const job = await prisma.communityReviewJob.create({ data: {
+        status: "pending", repoFullName: repo.fullName, repositoryId: repo.id, organizationId: org.id,
+        diff, githubToken: "fixture-token", expiresAt: new Date(Date.now() + 60_000),
+      } });
+      const { processCommunityReview } = await import("@/lib/community-review");
+      await processCommunityReview(job.id);
+      assert.equal((await prisma.communityReviewJob.findUniqueOrThrow({ where: { id: job.id } })).status, "completed");
+    }
+    assert.equal(calls, 1);
+    const completed = await snapshot();
+    assert.equal(completed.indexStatus, "indexed");
+    assert.equal(completed.totalVectors, 1);
+    assert.ok(completed.firstIndexedAt);
+    assert.deepEqual(completed.indexedAt, completed.firstIndexedAt);
+  } else if (scenario === "empty-incremental-full" || scenario === "legacy-incremental") {
+    let writes = 0;
+    let full = false;
+    mock.module("@/lib/qdrant", () => ({
+      ensureCollection: async () => {}, deleteRepoChunks: async () => {}, deleteRepoFileChunks: async () => {},
+      upsertChunks: async () => { writes++; },
+    }));
+    mock.module("@/lib/embeddings", () => ({ createEmbeddings: async (texts: string[]) => texts.map(() => [0.1]) }));
+    mock.module("@/lib/github", () => ({
+      getInstallationToken: async () => "fixture-token", getRepositoryDetails: async () => ({ default_branch: "main" }),
+      getFileContent: async (_id: number, _owner: string, _name: string, _ref: string, path: string) => path === ".octopusignore" ? null : "export const a = 1;",
+      addCommentReaction: async () => {}, getPullRequestDetails: async () => null, createCheckRun: async () => 1, updateCheckRun: async () => {},
+    }));
+    mock.module("next/server", () => ({ after: () => {}, NextRequest: Request, NextResponse: { json: Response.json } }));
+    mock.module("next/cache", () => ({ revalidatePath: () => {} }));
+    mock.module("@/lib/github-app-config", () => ({ getGithubAppConfig: async () => ({ webhookSecret: "fixture-secret" }) }));
+    mock.module("@/lib/webhook-shared", () => ({ startReviewFlow: async () => {} }));
+    mock.module("@/lib/repo-sync", () => ({ syncOrgRepos: async () => {}, applyRepositoryEvent: async () => {} }));
+    mock.module("@/lib/webhook-tenant", () => ({
+      resolveGithubWebhookTenant: async () => ({ status: "resolved", organizationId: org.id, repositoryId: repo.id }),
+      observeGithubWebhookDeliveryBestEffort: async () => {},
+    }));
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const path = String(input);
+      if (path.includes("/pulls/")) return Response.json([{ filename: "a.ts", status: "added" }]);
+      if (path.includes("/git/trees/")) return Response.json({ tree: full ? [{ type: "blob", path: "a.ts", sha: "fixture" }] : [] });
+      if (path.includes("/git/blobs/")) return Response.json({ encoding: "base64", content: Buffer.from("export const a = 1;").toString("base64") });
+      if (path.includes("/contributors")) return Response.json([]);
+      throw new Error(`Unexpected fixture request: ${path}`);
+    }) as typeof fetch;
+    const { indexRepository } = await import("@/lib/indexer");
+    const index = () => indexRepository(repo.id, repo.fullName, "main", 1);
+    await runRepositoryIndex(repo.id, indexAttemptId, index);
+    if (scenario === "legacy-incremental") await prisma.repository.update({ where: { id: repo.id }, data: { indexedAt: early } });
+    const { POST } = await import("@/app/api/github/webhook/route");
+    const body = JSON.stringify({ action: "closed", installation: { id: 1 }, repository: { id: fixture }, pull_request: { number: 1, merged: true } });
+    const response = await POST(new Request("https://fixture.invalid/api/github/webhook", { method: "POST", body, headers: {
+      "x-github-event": "pull_request", "x-hub-signature-256": "sha256=" + createHmac("sha256", "fixture-secret").update(body).digest("hex"),
+    } }) as never);
+    assert.equal(response.status, 200);
+    assert.equal(writes, 1, "The webhook must execute incremental embedding and storage");
+    const incremental = await snapshot();
+    assert.equal(incremental.firstIndexedAt, null);
+    if (scenario === "empty-incremental-full") assert.equal(incremental.indexedAt, null);
+    else assert.ok(incremental.indexedAt && incremental.indexedAt > early);
+    full = true;
+    await claim();
+    await runRepositoryIndex(repo.id, indexAttemptId, index);
+    const completed = await snapshot();
+    assert.equal(completed.indexStatus, "indexed");
+    assert.equal(completed.firstIndexedAt !== null, scenario === "empty-incremental-full");
+    assert.ok(completed.indexedAt);
   } else if (scenario.startsWith("local")) {
     mock.module("@/lib/qdrant", () => ({ deleteRepoChunks: async () => {}, upsertChunks: async () => {} }));
     mock.module("@/lib/embeddings", () => ({ createEmbeddings: async (texts: string[]) => texts.map(() => [0.1]) }));
@@ -177,6 +293,9 @@ try {
       await assert.rejects(() => claimLocalIndexBatch(id, 2, 3, files.slice(1), first.upload.id), /out of order/);
     } else if (scenario === "local-duplicate") {
       await assert.rejects(() => claimLocalIndexBatch(id, 1, 2, firstFiles, first.upload.id), /duplicate/);
+    } else if (scenario === "local-count-under" || scenario === "local-count-over") {
+      const finalFiles = scenario === "local-count-under" ? [] : [...files.slice(1), { path: "c.ts", content: "export const c = 3;" }];
+      await assert.rejects(() => claimLocalIndexBatch(id, 1, 2, finalFiles, first.upload.id), /declared file count/);
     } else if (scenario === "local-wrong-session") {
       await assert.rejects(() => claimLocalIndexBatch(id, 1, 2, files.slice(1), "old-upload"), /no longer current/);
     } else if (!single && scenario !== "local-nonfinal") {
@@ -194,6 +313,7 @@ try {
     if (scenario === "local-cancel") assert.equal(result.indexStatus, "pending");
   } else throw new Error(`Unknown scenario ${scenario}`);
 } finally {
+  await prisma.communityReviewJob.deleteMany({ where: { organizationId: org.id } });
   await prisma.organization.delete({ where: { id: org.id } });
   await prisma.$disconnect();
 }

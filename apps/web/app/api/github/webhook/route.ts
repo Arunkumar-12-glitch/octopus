@@ -372,9 +372,9 @@ export async function POST(request: NextRequest) {
               "github",
               repo.organizationId,
             );
-            await prisma.repository.update({
-              where: { id: repo.id },
-              data: { indexedAt: new Date(), indexStatus: "indexed" },
+            await prisma.repository.updateMany({
+              where: { id: repo.id, indexStatus: "indexed", indexedAt: { not: null } },
+              data: { indexedAt: new Date() },
             });
             console.log(`[webhook] PR #${prNumber} merged — incremental index: ${result.updatedFiles} updated, ${result.removedFiles} removed, ${result.newVectors} vectors`);
           } else {

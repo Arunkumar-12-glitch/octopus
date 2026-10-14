@@ -1,5 +1,6 @@
 import "server-only";
-import { runRepositoryIndex } from "@/lib/repository-index-completion";
+import { randomUUID } from "node:crypto";
+import { runRepositoryIndex, SupersededIndexError } from "@/lib/repository-index-completion";
 import { prisma } from "@octopus/db";
 import { enqueue } from "@/lib/queue";
 import type { LogLevel } from "@/lib/indexer";
@@ -68,13 +69,14 @@ export async function processRepositoryIndex(job: RepositoryIndexJob) {
   if (!repo || (repo.provider === "github" && (!installationId || (repo.installationId && repo.installationId !== installationId)))) return;
 
   // Share the reviewer's claim so a first PR and discovery cannot both index.
+  const indexAttemptId = randomUUID();
   const claim = await prisma.repository.updateMany({
     where: { id: repo.id, organizationId: job.organizationId, ...needsIndex },
-    data: { indexStatus: "indexing", indexAttemptId: null },
+    data: { indexStatus: "indexing", indexAttemptId },
   });
   if (!claim.count) return;
 
-  const controller = createAbortController(repo.id);
+  const controller = createAbortController(indexAttemptId);
   let timedOut = false;
   // Abort before pg-boss expires the attempt, so the catch can release its claim.
   const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, 25 * 60_000);
@@ -85,22 +87,25 @@ export async function processRepositoryIndex(job: RepositoryIndexJob) {
     writeSyncLog({ orgId: job.organizationId, repoId: repo.id, message, level, timestamp: Date.now() });
   };
   try {
-    const { indexRepository } = await import("@/lib/indexer");
-    await deleteSyncLogs(job.organizationId, repo.id);
-    await notify("indexing");
-    const stats = await runRepositoryIndex(repo.id, () => indexRepository(
-      repo.id, repo.fullName, repo.defaultBranch, installationId ?? 0, log,
-      controller.signal, repo.provider, job.organizationId,
-    ), controller.signal);
+    const stats = await runRepositoryIndex(repo.id, indexAttemptId, async () => {
+      const { indexRepository } = await import("@/lib/indexer");
+      await deleteSyncLogs(job.organizationId, repo.id);
+      await notify("indexing");
+      return indexRepository(
+        repo.id, repo.fullName, repo.defaultBranch, installationId ?? 0, log,
+        controller.signal, repo.provider, job.organizationId,
+      );
+    }, controller.signal);
     log(`Indexing complete: ${stats.indexedFiles} files, ${stats.totalVectors} vectors`, "success");
     await notify("indexed");
   } catch (error) {
+    if (error instanceof SupersededIndexError) return;
     const isCancelled = controller.signal.aborted && !timedOut;
     log(`Indexing failed: ${error instanceof Error ? error.message : String(error)}`, "error");
     await notify(isCancelled ? "cancelled" : "failed");
     if (!isCancelled) throw error;
   } finally {
     clearTimeout(timeout);
-    clearAbortController(repo.id);
+    clearAbortController(indexAttemptId);
   }
 }

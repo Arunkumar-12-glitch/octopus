@@ -1,5 +1,4 @@
 import "server-only";
-import { randomUUID } from "node:crypto";
 import { prisma, type Prisma } from "@octopus/db";
 import type { IndexStats } from "@/lib/indexer";
 
@@ -11,21 +10,18 @@ export class SupersededIndexError extends Error {
 /** Persist a complete snapshot and its milestones in one guarded transaction. */
 export async function runRepositoryIndex(
   repositoryId: string,
+  indexAttemptId: string,
   work: () => Promise<IndexStats>,
   signal?: AbortSignal,
 ): Promise<IndexStats> {
-  const attempt = await prisma.repository.findUniqueOrThrow({
-    where: { id: repositoryId }, select: { updatedAt: true, indexStatus: true },
-  });
-  if (attempt.indexStatus !== "indexing") throw new SupersededIndexError();
-  const indexAttemptId = randomUUID();
-  const claimed = await prisma.repository.updateMany({
-    where: { id: repositoryId, indexStatus: "indexing", updatedAt: attempt.updatedAt, indexAttemptId: null },
-    data: { indexAttemptId },
-  });
-  if (!claimed.count) throw new SupersededIndexError();
   const where = { id: repositoryId, indexStatus: "indexing", indexAttemptId };
   try {
+    const attempt = await prisma.repository.findUniqueOrThrow({
+      where: { id: repositoryId }, select: { indexStatus: true, indexAttemptId: true },
+    });
+    if (attempt.indexStatus !== "indexing" || attempt.indexAttemptId !== indexAttemptId) {
+      throw new SupersededIndexError();
+    }
     signal?.throwIfAborted();
     const stats = await work();
     signal?.throwIfAborted();
@@ -36,7 +32,7 @@ export async function runRepositoryIndex(
     await prisma.$transaction(async tx => {
       signal?.throwIfAborted();
       const saved = await tx.repository.updateMany({ where, data: {
-        indexStatus: "indexed", indexAttemptId: null,
+        indexStatus: "indexed",
         totalFiles: stats.totalFiles, indexedFiles: stats.indexedFiles,
         totalChunks: stats.totalChunks, totalVectors: stats.totalVectors,
         contributorCount: stats.contributorCount,
@@ -55,9 +51,10 @@ export async function runRepositoryIndex(
     return stats;
   } catch (error) {
     // Never let an expired worker overwrite its replacement's state.
-    await prisma.repository.updateMany({ where, data: {
-      indexStatus: signal?.aborted ? "pending" : "failed", indexAttemptId: null,
+    const released = await prisma.repository.updateMany({ where, data: {
+      indexStatus: signal?.aborted ? "pending" : "failed",
     } });
+    if (!released.count) throw new SupersededIndexError();
     throw error;
   }
 }

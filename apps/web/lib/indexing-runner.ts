@@ -1,5 +1,5 @@
 import "server-only";
-import { runRepositoryIndex } from "@/lib/repository-index-completion";
+import { runRepositoryIndex, SupersededIndexError } from "@/lib/repository-index-completion";
 import { prisma } from "@octopus/db";
 import { pubby } from "@/lib/pubby";
 import { clearAbortController } from "@/lib/indexing-abort";
@@ -15,21 +15,19 @@ export async function runIndexingInBackground(
   channel: string,
   emitLog: (message: string, level?: LogLevel) => void,
   abortController: AbortController,
+  indexAttemptId: string,
   provider: string = "github",
 ) {
   try {
-    const { indexRepository: runIndexing } = await import("@/lib/indexer");
-    const stats = await runRepositoryIndex(repoId, () => runIndexing(
-      repoId,
-      fullName,
-      defaultBranch,
-      installationId,
-      emitLog,
-      abortController.signal,
-      provider,
-      organizationId,
-    ), abortController.signal);
-
+    const stats = await runRepositoryIndex(repoId, indexAttemptId, async () => {
+      const { indexRepository: runIndexing } = await import("@/lib/indexer");
+      await pubby.trigger(channel, "index-status", { repoId, status: "indexing" });
+      emitLog(`Starting indexing for ${fullName}...`);
+      return runIndexing(
+        repoId, fullName, defaultBranch, installationId, emitLog,
+        abortController.signal, provider, organizationId,
+      );
+    }, abortController.signal);
 
     emitLog(`Indexing completed for ${fullName}`, "success");
 
@@ -39,8 +37,8 @@ export async function runIndexingInBackground(
       const { summarizeRepository } = await import("@/lib/summarizer");
       const { summary, purpose } = await summarizeRepository(repoId, fullName, organizationId);
 
-      await prisma.repository.update({
-        where: { id: repoId },
+      await prisma.repository.updateMany({
+        where: { id: repoId, indexStatus: "indexed", indexAttemptId },
         data: { summary, purpose },
       });
 
@@ -50,7 +48,10 @@ export async function runIndexingInBackground(
       emitLog("Summary generation failed (indexing still succeeded)", "warning");
     }
 
-    clearAbortController(repoId);
+    clearAbortController(indexAttemptId);
+
+    const current = await prisma.repository.findUnique({ where: { id: repoId }, select: { indexAttemptId: true, indexStatus: true } });
+    if (current?.indexAttemptId !== indexAttemptId || current.indexStatus !== "indexed") return;
 
     eventBus.emit({
       type: "repo-indexed",
@@ -67,13 +68,13 @@ export async function runIndexingInBackground(
       status: "indexed",
     });
   } catch (error) {
-    clearAbortController(repoId);
+    clearAbortController(indexAttemptId);
+    if (error instanceof SupersededIndexError) return;
 
     const errorMsg = error instanceof Error ? error.message : "Unknown error";
     const isCancelled = abortController.signal.aborted || errorMsg === "Indexing cancelled";
 
     console.error(`Failed to index repo ${fullName}:`, error);
-
 
     if (isCancelled) {
       emitLog("Indexing cancelled by user", "warning");

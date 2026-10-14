@@ -8,10 +8,16 @@ const deleted: string[] = [];
 const embedded: string[][] = [];
 let afterUpsert: (() => void) | undefined;
 let invalidEmbeddings = false;
+let suppliedToken: string | undefined;
+let ignoreContent: string | null = null;
 mock.module("@/lib/github", () => ({
-  getInstallationToken: async () => "test-token",
+  getInstallationToken: async () => { assert.equal(suppliedToken, undefined); return "test-token"; },
   getRepositoryDetails: async () => details,
-  getFileContent: async () => null,
+  getFileContent: async (_id: number, _owner: string, _repo: string, _ref: string, path: string, token?: string) => {
+    assert.equal(path, ".octopusignore");
+    assert.equal(token, suppliedToken ?? "test-token");
+    return ignoreContent;
+  },
 }));
 mock.module("@/lib/bitbucket", () => ({}));
 mock.module("@/lib/gitlab", () => ({}));
@@ -24,7 +30,8 @@ mock.module("@/lib/forgejo", () => ({
     assert.equal(ref, forgejoSha);
     return [".octopusignore", "index.ts", "ignored.ts", "oversized.ts"];
   },
-  getFileContent: async (_org: string, _name: string, ref: string, file: string) => {
+  getFileContent: async (_org: string, _name: string, ref: string, file: string, options?: { strict?: boolean }) => {
+    assert.equal(options?.strict, true);
     assert.equal(ref, forgejoSha);
     if (forgejoFailure) throw new Error("Forgejo unavailable");
     if (file === ".octopusignore") return "ignored.ts";
@@ -175,3 +182,19 @@ afterUpsert = () => controller.abort(new Error("Indexing cancelled"));
 await assert.rejects(() => indexRepository("repo-1", "acme/new", "main", 123, undefined, controller.signal), /Indexing cancelled/);
 afterUpsert = undefined;
 console.log("Incomplete tree, file failure, embedding failure and late cancellation regressions passed");
+
+reset();
+suppliedToken = "actions-fixture-token";
+ignoreContent = "ignored.ts";
+responses.set("/git/trees/main?recursive=1", [200, { tree: [
+  { path: ".octopusignore", type: "blob", sha: "ignore" },
+  { path: "index.ts", type: "blob", sha: "good" },
+  { path: "ignored.ts", type: "blob", sha: "ignored" },
+] }]);
+responses.set("/git/blobs/good", [200, { encoding: "base64", content: Buffer.from("export const good = 1;").toString("base64") }]);
+const tokenResult = await indexRepository("repo-1", "acme/new", "main", 0, undefined, undefined, "github", "org-1", suppliedToken);
+assert.equal(tokenResult.indexedFiles, 1);
+assert.ok(tokenResult.totalVectors > 0);
+assert.ok(!requests.some(url => url.endsWith("/git/blobs/ignored")));
+ignoreContent = null;
+await assert.rejects(() => indexRepository("repo-1", "acme/new", "main", 0, undefined, undefined, "github", "org-1", suppliedToken), /could not read .octopusignore/);

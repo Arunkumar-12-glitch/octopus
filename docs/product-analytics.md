@@ -63,7 +63,8 @@ files, binary content and configured size limits are intentional exclusions.
 File-read failures, truncated inventories, incomplete embeddings, cancelled or
 superseded attempts do not qualify. A valid empty snapshot can still support
 reviewing a first PR, but does not set this milestone. Incremental updates cannot
-establish a first full index.
+establish a first full index: they leave a null `indexedAt` unchanged until a
+usable full index completes, and refresh only an existing non-null `indexedAt`.
 
 For local uploads, the server validates ordered batches, unique paths and the
 declared file count. The first response returns `uploadId`; send it unchanged

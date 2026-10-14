@@ -1,4 +1,5 @@
 import "server-only";
+import { randomUUID } from "node:crypto";
 import { runRepositoryIndex } from "@/lib/repository-index-completion";
 import { authenticateApiToken } from "@/lib/api-auth";
 import { prisma } from "@octopus/db";
@@ -250,23 +251,16 @@ export async function POST(request: NextRequest) {
       const { summarizeRepository } = await import("@/lib/summarizer");
       const { analyzeRepository } = await import("@/lib/analyzer");
 
-      await prisma.repository.update({
-        where: { id: repo.id },
-        data: { indexStatus: "indexing", indexAttemptId: null },
+      const indexAttemptId = randomUUID();
+      const claim = await prisma.repository.updateMany({
+        where: { id: repo.id, indexStatus: { not: "indexing" } },
+        data: { indexStatus: "indexing", indexAttemptId },
       });
-
-      const indexStats = await runRepositoryIndex(repo.id, () => indexRepository(
-        repo.id,
-        fullName,
-        ghRepoInfo.defaultBranch,
-        0,
-        () => {},
-        undefined,
-        "github",
-        orgId,
-        githubToken,
+      if (!claim.count) throw new Error("Repository indexing is already in progress");
+      await runRepositoryIndex(repo.id, indexAttemptId, () => indexRepository(
+        repo.id, fullName, ghRepoInfo.defaultBranch, 0, () => {},
+        undefined, "github", orgId, githubToken,
       ));
-
 
       try {
         const { summary, purpose } = await summarizeRepository(repo.id, fullName, orgId);
