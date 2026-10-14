@@ -26,15 +26,9 @@ import {
  * call so a slow embed API doesn't push the request over typical proxy timeouts
  * and so the user can see progress.
  *
- * Body shape per batch:
- *   - First batch (batchIndex = 0): { remoteUrl, defaultBranch, totalBatches,
- *     totalFiles, batchIndex: 0, files }
- *     → creates the Repository row (or re-uses an existing CLI-uploaded one),
- *       wipes prior chunks, sets indexStatus=indexing, then processes batch 0.
- *   - Subsequent batches: { repoId, totalBatches, batchIndex, files }
- *     → process files against an existing in-progress row.
- *   - Last batch (batchIndex === totalBatches - 1): also flips indexStatus to
- *     "indexed" + records indexedAt + indexDurationMs.
+ * Request fields are defined by FirstBatchBody and SubsequentBatchBody below.
+ * Upload verification, generation activation and timestamp semantics are owned
+ * by docs/product-analytics.md#first-successful-index.
  *
  * Hard limits to keep request size sane:
  *   - 5 MB total body (Next.js default proxy limits start to bite past this)
@@ -43,11 +37,10 @@ import {
  *
  * Errors:
  *   - 401 unauth
- *   - 400 bad input (parse, batch-index gaps, file too big, etc.)
- *   - 409 the repo is managed via platform installation — index it via the
- *     usual flow instead.
- *   - 500 on indexing failure — repo row gets indexStatus=failed so the CLI's
- *     poll sees it.
+ *   - 400 malformed input or invalid field values
+ *   - 409 platform-managed repo, in-flight upload, stale/out-of-order batch,
+ *     duplicate path or declared file-count mismatch
+ *   - 500 on indexing failure — marks only the still-owned attempt failed.
  *
  * Audit log: one row per first-batch (cli.index_local_start) and one per
  * final-batch (cli.index_local_complete) so admins can see who triggered
@@ -200,7 +193,7 @@ export async function POST(request: Request) {
   // Spend-limit gate — same invariant the sibling CLI review endpoints enforce.
   // Run AFTER repo resolution so that we have a repoId in hand. ALWAYS mark
   // the repo failed before returning, including on the first batch: by this
-  // point `prepareRepoForLocalIndex` has already created / wiped the row at
+  // point `prepareRepoForLocalIndex` has already created / claimed the row at
   // indexStatus="indexing" (it runs above as part of the first-batch path),
   // so a 402 without cleanup would strand the row in the same way a
   // mid-upload 402 strands it. The CLI's retry loop and the dashboard's

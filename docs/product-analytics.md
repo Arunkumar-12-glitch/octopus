@@ -51,6 +51,12 @@ is not a mandatory predecessor on every supported path. `latest_index_at` is
 the latest stored index time, never the first. Deleted repositories and PRs can
 remove historical observations, so source retention limits must accompany charts.
 
+The initial cash projection covers only retained LIVE conversion events with
+delivery receipts. That is a lower bound on historical payments, not processor
+completeness. Missing payloads, missing organisation links and conflicting event
+identities need reconciliation. Keep currencies separate. Refunds are separate
+events; gross conversion and retained revenue answer different questions.
+
 ### First successful index
 
 `firstIndexedAt` is the earliest known completion of a full, usable repository
@@ -71,8 +77,9 @@ code-index query or deletion are scoped to that generation. The guarded database
 completion transaction activates the generation together with its statistics and
 milestones; staged, failed and cancelled runs remain invisible to search. A late
 remote mutation after a client timeout can only affect its original generation.
-Existing rows retain a null active generation and read only legacy untagged data;
-there is no backfill. Incremental updates bind the stable active generation, so
+Existing rows start with a null active generation and read only legacy untagged
+data until a full replacement completes; there is no backfill.
+Incremental updates bind the stable active generation, so
 metadata edits and other merges do not invalidate their writes or failure cleanup.
 Previous and abandoned generations remain stored; this change adds no cleanup job.
 Queue timeouts persist as failures, while user cancellations return to pending.
@@ -81,22 +88,17 @@ state so a delayed event cannot overwrite a replacement's status.
 
 For local uploads, the server validates ordered batches, unique paths and the
 declared file count. The first response returns `uploadId`; send it unchanged
-with every later batch to bind the upload to the same attempt. A complete,
-non-empty single batch also qualifies. Older clients remain supported without
-`uploadId`, but their multi-batch completion is unverified and must leave the
-first-index date unknown. The CLI implementation is maintained separately.
+with every later batch to bind the upload to the same attempt. A single batch
+also qualifies if it produces a complete, usable index. Older clients remain
+supported without `uploadId`, but their unverified multi-batch completion never
+establishes a first-index date; any previously recorded date is preserved.
+The CLI implementation is maintained separately.
 
 Rows with an earlier `indexedAt` and no `firstIndexedAt` retain an unknown first
 date. Do not backfill from the latest date or present null as “never indexed.”
-Historical backfill and exporting this field in the restricted analytics views
-remain separate reviewed work under #924; this change does not alter live
+Exporting this field in the restricted analytics views remains separate
+reviewed work under #924; this change does not alter live
 PostHog sources, schedules or grants.
-
-The initial cash projection covers only retained LIVE conversion events with
-delivery receipts. That is a lower bound on historical payments, not processor
-completeness. Missing payloads, missing organisation links and conflicting event
-identities need reconciliation. Keep currencies separate. Refunds are separate
-events; gross conversion and retained revenue answer different questions.
 
 ## Restricted source dataset
 

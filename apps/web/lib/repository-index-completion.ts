@@ -48,7 +48,7 @@ export async function runRepositoryIndex(
       if (saved.count !== 1) throw new SupersededIndexError();
       signal?.throwIfAborted();
       // Empty snapshots are valid for reviewing a first PR, but deliver no
-      // indexed content. Keep dates unset until there is a usable full index.
+      // indexed content. Leave existing dates unchanged.
       if (stats.indexedFiles > 0 && stats.totalChunks > 0 && stats.totalVectors === stats.totalChunks) {
         await recordRepositoryIndexCompletion(tx, repositoryId);
       }
