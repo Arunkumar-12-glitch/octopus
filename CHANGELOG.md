@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.17] - 2026-10-14
+
+### Fixed
+
+- Preserve the first verified successful repository index date across later reindexing.
+- Failed, cancelled, partial and empty indexing runs no longer establish a first successful index date. Older unverified dates remain unknown.
+- Prevent superseded indexing attempts and older workers from overwriting or deleting a replacement index during deployment.
+- Keep existing CLI uploads working; clients using verified upload batches can establish the first successful index date.
+
+### Upgrade notes
+
+- Apply the three additive repository-index migrations before updating web and review workers. No historical dates are backfilled.
+- Retain existing vector data during the upgrade. Downgrading to a pre-generation release requires draining indexing work and rebuilding affected indexes; a binary downgrade alone does not restore current index coverage.
+- Existing analytics connectors, schedules and credentials stay unchanged. Exporting the new milestone into reporting views remains a separate change.
+
 ## [1.2.16] - 2026-10-10
 
 ### Fixed
