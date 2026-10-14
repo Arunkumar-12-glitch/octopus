@@ -37,6 +37,7 @@ export async function runRepositoryIndex(
       signal?.throwIfAborted();
       const saved = await tx.repository.updateMany({ where, data: {
         indexStatus: "indexed",
+        activeIndexGeneration: indexAttemptId,
         totalFiles: stats.totalFiles, indexedFiles: stats.indexedFiles,
         totalChunks: stats.totalChunks, totalVectors: stats.totalVectors,
         contributorCount: stats.contributorCount,

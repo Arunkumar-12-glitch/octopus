@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 mock.module("server-only", () => ({}));
 const { ForgejoResponseTooLargeError } = await import("@/lib/forgejo-http");
 let details: { default_branch: string } | null = { default_branch: "main" };
-const deleted: string[] = [];
+let writes = 0;
 const embedded: string[][] = [];
 let afterUpsert: (() => void) | undefined;
 let invalidEmbeddings = false;
@@ -42,9 +42,8 @@ mock.module("@/lib/forgejo", () => ({
 }));
 mock.module("@/lib/qdrant", () => ({
   ensureCollection: async () => {},
-  deleteRepoChunks: async (owner: { repoId: string; indexAttemptId: string }) => { assert.equal(owner.indexAttemptId, "attempt-1"); deleted.push(owner.repoId); },
   deleteRepoFileChunks: async () => {},
-  upsertChunks: async () => { afterUpsert?.(); },
+  upsertChunks: async (_points: unknown[], owner: { repoId: string; indexAttemptId: string }) => { assert.equal(owner.indexAttemptId, "attempt-1"); writes++; afterUpsert?.(); },
 }));
 mock.module("@/lib/embeddings", () => ({
   createEmbeddings: async (texts: string[]) => {
@@ -68,7 +67,7 @@ async function run(branch = "main") {
   return indexRepository({ repoId: "repo-1", indexAttemptId: "attempt-1" }, "acme/new", branch, 123);
 }
 function reset() {
-  responses.clear(); requests.length = 0; deleted.length = 0; embedded.length = 0;
+  responses.clear(); requests.length = 0; writes = 0; embedded.length = 0;
   details = { default_branch: "main" };
   responses.set("/contributors?per_page=30", [200, []]);
 }
@@ -78,7 +77,7 @@ reset();
 responses.set("/git/trees/main?recursive=1", [404, { message: "Git Repository is empty." }]);
 responses.set("/commits/main", [200, { commit: { tree: { sha: emptySha } } }]);
 assert.equal((await run()).totalFiles, 0);
-assert.deepEqual(deleted, ["repo-1"], "empty snapshots must clear an older index");
+assert.equal(writes, 0, "empty snapshots need no staged vectors");
 assert.equal(embedded.length, 0, "empty trees must not be embedded");
 
 reset();
@@ -92,29 +91,29 @@ assert.equal((await run()).indexedFiles, 0);
 reset();
 responses.set("/git/trees/main?recursive=1", [200, {}]);
 await assert.rejects(run, /Invalid repository tree response/);
-assert.equal(deleted.length, 0);
+assert.equal(writes, 0);
 
 reset();
 responses.set("/git/trees/main?recursive=1", [404, { message: "Not Found" }]);
 responses.set("/commits/main", [404, { message: "Not Found" }]);
 await assert.rejects(run, /Branch 'main' not found/);
-assert.equal(deleted.length, 0);
+assert.equal(writes, 0);
 
 reset();
 responses.set("/git/trees/main?recursive=1", [404, {}]);
 responses.set("/commits/main", [200, { commit: { tree: { sha: "nonempty-tree" } } }]);
 await assert.rejects(run, /no tree for existing branch/);
-assert.equal(deleted.length, 0);
+assert.equal(writes, 0);
 
 reset(); details = null;
 responses.set("/git/trees/main?recursive=1", [404, {}]);
 await assert.rejects(run, /does not have access/);
-assert.equal(deleted.length, 0);
+assert.equal(writes, 0);
 
 for (const status of [403, 429, 500, 409]) {
   reset(); responses.set("/git/trees/main?recursive=1", [status, { message: "Failure" }]);
   await assert.rejects(run, new RegExp(`Failed to fetch tree: ${status}`));
-  assert.equal(deleted.length, 0);
+  assert.equal(writes, 0);
 }
 
 reset();
@@ -150,7 +149,7 @@ assert.equal(forgejoResult.totalFiles, 4, "inventory includes files skipped by i
 assert.equal(requests.length, 0, "Forgejo must use its validated transport instead of GitHub or git clone");
 reset(); forgejoFailure = true;
 await assert.rejects(indexRepository({ repoId: "repo-1", indexAttemptId: "attempt-1" }, "acme/new", "main", 0, undefined, undefined, "forgejo", "org-1"), /Forgejo unavailable/);
-assert.equal(deleted.length, 0, "failed fetch must preserve the prior index");
+assert.equal(writes, 0, "failed fetch must preserve the prior index");
 
 // Incomplete snapshots must fail before replacing the previous searchable data.
 reset();
@@ -161,13 +160,13 @@ responses.set("/git/trees/main?recursive=1", [200, { tree: [
 responses.set("/git/blobs/good", [200, { encoding: "base64", content: Buffer.from("export const good = 1;").toString("base64") }]);
 responses.set("/git/blobs/bad", [500, {}]);
 await assert.rejects(run, /Indexing incomplete/);
-assert.equal(deleted.length, 0, "a partially fetched tree must preserve the previous index");
+assert.equal(writes, 0, "a partially fetched tree must preserve the previous index");
 assert.equal(embedded.length, 0);
 
 reset();
 responses.set("/git/trees/main?recursive=1", [200, { tree: [], truncated: true }]);
 await assert.rejects(run, /partial repository tree/);
-assert.equal(deleted.length, 0);
+assert.equal(writes, 0);
 
 reset();
 responses.set("/git/trees/main?recursive=1", [200, { tree: [

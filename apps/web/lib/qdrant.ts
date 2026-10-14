@@ -8,9 +8,7 @@ import { getEmbedConfig } from "@/lib/embed-config";
 // Qdrant point IDs must be uint or UUID. Existing UUID inputs pass through
 // unchanged (so callers using crypto.randomUUID() are unaffected); non-UUID
 // strings (e.g. Prisma CUIDs) are mapped deterministically into a UUIDv5-shaped
-// string. Applied at every upsert call site via applyQdrantId() so the helper
-// is the single source of truth and any future caller passing a non-UUID is
-// handled correctly.
+// string.
 function toQdrantId(id: string): string {
   if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
     return id;
@@ -172,7 +170,7 @@ export async function upsertChunks(
   }[],
   owner: RepositoryIndexOwner,
 ) {
-  const { withRepositoryIndexStorage } = await import("@/lib/repository-index-storage");
+  const { getRepositoryIndexGeneration } = await import("@/lib/repository-index-storage");
   if (points.some(point => point.payload.repoId !== owner.repoId)) throw new Error("Index points must belong to the claimed repository");
   // createEmbeddings returns [] for points whose org is over its spend limit;
   // qdrant rejects dim=0 dense vectors, so drop those points before sending.
@@ -185,7 +183,12 @@ export async function upsertChunks(
   const qdrant = getQdrantClient();
   // Qdrant accepts max 100 points per request
   for (let i = 0; i < points.length; i += 100) {
-    const slice = points.slice(i, i + 100).map((p) => ({ ...applyQdrantId(p.id, p.payload), vector: p.vector, sparseVector: p.sparseVector }));
+    const generation = await getRepositoryIndexGeneration(owner);
+    const slice = points.slice(i, i + 100).map((p) => ({
+      id: toQdrantId(JSON.stringify([owner.repoId, generation, p.id])),
+      payload: sanitizePayload({ ...p.payload, originalId: p.id, indexGeneration: generation }),
+      vector: p.vector, sparseVector: p.sparseVector,
+    }));
     const batch = slice.map((p) => ({
       id: p.id,
       vector: p.sparseVector
@@ -193,58 +196,44 @@ export async function upsertChunks(
         : p.vector,
       payload: p.payload,
     }));
-    await withRepositoryIndexStorage(owner, async () => {
-      try {
-        await withQdrantRetry(() => qdrant.upsert(COLLECTION_NAME, { points: batch, wait: true }), `upsert ${COLLECTION_NAME}`);
-      } catch (error) {
-        if (!isSparseVectorError(error)) throw error;
-        console.warn("[qdrant] Falling back to dense-only upsert", { collection: COLLECTION_NAME, error: error instanceof Error ? error.message : error });
-        const denseBatch = slice.map((p) => ({
-          id: p.id,
-          vector: p.vector,
-          payload: p.payload,
-        }));
-        await withQdrantRetry(() => qdrant.upsert(COLLECTION_NAME, { points: denseBatch, wait: true }), `upsert ${COLLECTION_NAME} dense`);
-      }
-    });
+    try {
+      await withQdrantRetry(() => qdrant.upsert(COLLECTION_NAME, { points: batch, wait: true }), `upsert ${COLLECTION_NAME}`);
+    } catch (error) {
+      if (!isSparseVectorError(error)) throw error;
+      console.warn("[qdrant] Falling back to dense-only upsert", { collection: COLLECTION_NAME, error: error instanceof Error ? error.message : error });
+      const denseBatch = slice.map((p) => ({
+        id: p.id,
+        vector: p.vector,
+        payload: p.payload,
+      }));
+      await withQdrantRetry(() => qdrant.upsert(COLLECTION_NAME, { points: denseBatch, wait: true }), `upsert ${COLLECTION_NAME} dense`);
+    }
   }
-}
-
-export async function deleteRepoChunks(owner: RepositoryIndexOwner) {
-  const { withRepositoryIndexStorage } = await import("@/lib/repository-index-storage");
-  const qdrant = getQdrantClient();
-  await withRepositoryIndexStorage(owner, () => qdrant.delete(COLLECTION_NAME, {
-    wait: true,
-    filter: {
-      must: [{ key: "repoId", match: { value: owner.repoId } }],
-    },
-  }));
 }
 
 export async function deleteRepoFileChunks(owner: RepositoryIndexOwner, filePaths: string[]) {
   if (filePaths.length === 0) return;
-  const { withRepositoryIndexStorage } = await import("@/lib/repository-index-storage");
-  const qdrant = getQdrantClient();
-  await withRepositoryIndexStorage(owner, () => qdrant.delete(COLLECTION_NAME, {
+  const { getRepositoryIndexGeneration, repositoryCodeFilter } = await import("@/lib/repository-index-storage");
+  const generation = await getRepositoryIndexGeneration(owner);
+  await getQdrantClient().delete(COLLECTION_NAME, {
     wait: true,
-    filter: {
-      must: [
-        { key: "repoId", match: { value: owner.repoId } },
-        { key: "filePath", match: { any: filePaths } },
-      ],
-    },
-  }));
+    filter: { must: [
+      repositoryCodeFilter(owner.repoId, generation),
+      { key: "filePath", match: { any: filePaths } },
+    ] },
+  });
 }
 
 export async function getRepoChunks(
   repoId: string,
   limit = 50,
 ): Promise<string[]> {
+  const { getActiveRepositoryCodeFilter } = await import("@/lib/repository-index-storage");
+  const filter = await getActiveRepositoryCodeFilter([repoId]);
+  if (!filter) return [];
   const qdrant = getQdrantClient();
   const result = await qdrant.scroll(COLLECTION_NAME, {
-    filter: {
-      must: [{ key: "repoId", match: { value: repoId } }],
-    },
+    filter,
     limit,
     with_payload: true,
     with_vector: false,
@@ -263,7 +252,9 @@ export async function searchSimilarChunks(
 ): Promise<{ filePath: string; text: string; startLine: number; endLine: number; score: number }[]> {
   if (queryVector.length === 0) return [];
   const qdrant = getQdrantClient();
-  const filter = { must: [{ key: "repoId", match: { value: repoId } }] };
+  const { getActiveRepositoryCodeFilter } = await import("@/lib/repository-index-storage");
+  const filter = await getActiveRepositoryCodeFilter([repoId]);
+  if (!filter) return [];
 
   let points: { payload?: Record<string, unknown> | null; score: number }[];
 
@@ -317,12 +308,9 @@ export async function searchCodeChunksAcrossRepos(
   if (repoIds.length === 0) return [];
   if (queryVector.length === 0) return [];
   const qdrant = getQdrantClient();
-  const filter = {
-    should: repoIds.map((id) => ({
-      key: "repoId",
-      match: { value: id },
-    })),
-  };
+  const { getActiveRepositoryCodeFilter } = await import("@/lib/repository-index-storage");
+  const filter = await getActiveRepositoryCodeFilter(repoIds);
+  if (!filter) return [];
 
   let points: { payload?: Record<string, unknown> | null; score: number }[];
 
@@ -412,7 +400,6 @@ export async function upsertKnowledgeChunks(
     payload: Record<string, unknown>;
     sparseVector?: { indices: number[]; values: number[] };
   }[],
-  owner: RepositoryIndexOwner,
 ) {
   // createEmbeddings returns [] for points whose org is over its spend limit;
   // qdrant rejects dim=0 dense vectors, so drop those points before sending.
@@ -579,7 +566,6 @@ export async function upsertReviewChunks(
     payload: Record<string, unknown>;
     sparseVector?: { indices: number[]; values: number[] };
   }[],
-  owner: RepositoryIndexOwner,
 ) {
   // createEmbeddings returns [] for points whose org is over its spend limit;
   // qdrant rejects dim=0 dense vectors, so drop those points before sending.
@@ -1142,7 +1128,6 @@ export async function upsertDocsChunks(
     payload: Record<string, unknown>;
     sparseVector?: { indices: number[]; values: number[] };
   }[],
-  owner: RepositoryIndexOwner,
 ) {
   // createEmbeddings returns [] for points whose org is over its spend limit;
   // qdrant rejects dim=0 dense vectors, so drop those points before sending.

@@ -1,31 +1,40 @@
 import "server-only";
-import { databasePool } from "@octopus/db";
+import { prisma } from "@octopus/db";
+import type { Schemas } from "@qdrant/js-client-rest";
 import { SupersededIndexError } from "@/lib/repository-index-completion";
 
 export type RepositoryIndexOwner = { repoId: string; signal?: AbortSignal } & (
-  { indexAttemptId: string } | { uploadId: string } | { updatedAt: Date }
+  { indexAttemptId: string; uploadId?: string } | { activeIndexGeneration: string | null }
 );
 
-export async function withRepositoryIndexStorage<T>(owner: RepositoryIndexOwner, mutate: () => Promise<T>): Promise<T> {
+export async function getRepositoryIndexGeneration(owner: RepositoryIndexOwner): Promise<string | null> {
   owner.signal?.throwIfAborted();
-  const client = await databasePool.connect();
-  try {
-    await client.query("BEGIN");
-    const [condition, value] = "indexAttemptId" in owner
-      ? [`"indexStatus" = 'indexing' AND "indexAttemptId" = $2`, owner.indexAttemptId]
-      : "uploadId" in owner
-        ? [`"indexStatus" = 'indexing' AND "indexAttemptId" IS NULL AND "localIndexUpload"->>'id' = $2`, owner.uploadId]
-        : [`"indexStatus" = 'indexed' AND "updatedAt" = $2::timestamp`, owner.updatedAt.toISOString()];
-    const result = await client.query(`SELECT id FROM repositories WHERE id = $1 AND ${condition} FOR UPDATE`, [owner.repoId, value]);
-    if (result.rowCount !== 1) throw new SupersededIndexError();
-    owner.signal?.throwIfAborted();
-    const resultValue = await mutate();
-    await client.query("COMMIT");
-    return resultValue;
-  } catch (error) {
-    await client.query("ROLLBACK");
-    throw error;
-  } finally {
-    client.release();
-  }
+  const current = await prisma.repository.findFirst({
+    where: {
+      id: owner.repoId,
+      ...("indexAttemptId" in owner ? {
+        indexStatus: "indexing", indexAttemptId: owner.indexAttemptId,
+        ...(owner.uploadId === undefined ? {} : { localIndexUpload: { path: ["id"], equals: owner.uploadId } }),
+      } : { indexStatus: "indexed", activeIndexGeneration: owner.activeIndexGeneration }),
+    },
+    select: { id: true },
+  });
+  if (!current) throw new SupersededIndexError();
+  owner.signal?.throwIfAborted();
+  return "indexAttemptId" in owner ? owner.uploadId ?? owner.indexAttemptId : owner.activeIndexGeneration;
+}
+
+export function repositoryCodeFilter(repoId: string, generation: string | null): Schemas["Filter"] {
+  return { must: [
+    { key: "repoId", match: { value: repoId } },
+    generation === null ? { is_empty: { key: "indexGeneration" } } : { key: "indexGeneration", match: { value: generation } },
+  ] };
+}
+
+export async function getActiveRepositoryCodeFilter(repoIds: string[]): Promise<Schemas["Filter"] | null> {
+  if (!repoIds.length) return null;
+  const repos = await prisma.repository.findMany({
+    where: { id: { in: repoIds } }, select: { id: true, activeIndexGeneration: true },
+  });
+  return repos.length ? { should: repos.map(repo => repositoryCodeFilter(repo.id, repo.activeIndexGeneration)) } : null;
 }

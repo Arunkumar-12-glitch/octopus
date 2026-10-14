@@ -214,7 +214,7 @@ export async function POST(request: Request) {
   }
 
   try {
-    const result = await indexLocalBatch(repoId, fullName, auth.org.id, body.files, claim.attemptId);
+    const result = await indexLocalBatch(repoId, fullName, auth.org.id, body.files, claim);
     await recordLocalIndexProgress(
       repoId,
       startedAt,

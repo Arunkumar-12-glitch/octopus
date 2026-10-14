@@ -66,11 +66,16 @@ reviewing a first PR, but does not set this milestone. Incremental updates canno
 establish a first full index: they leave a null `indexedAt` unchanged until a
 usable full index completes, and refresh only an existing non-null `indexedAt`.
 
-Storage writes and deletes hold the repository row lock until Qdrant confirms
-completion. Cancellation and replacement claims wait for in-flight requests;
-each later storage batch rechecks its attempt or upload identity under that lock.
-Incremental writes are bound to the indexed snapshot they started from. Queue
-timeouts persist as failures, while user cancellations return to pending.
+Full runs and local uploads write to separate generations. Point IDs and every
+code-index query or deletion are scoped to that generation. The guarded database
+completion transaction activates the generation together with its statistics and
+milestones; staged, failed and cancelled runs remain invisible to search. A late
+remote mutation after a client timeout can only affect its original generation.
+Existing rows retain a null active generation and read only legacy untagged data;
+there is no backfill. Incremental updates bind the stable active generation, so
+metadata edits and other merges do not invalidate their writes or failure cleanup.
+Previous and abandoned generations remain stored; this change adds no cleanup job.
+Queue timeouts persist as failures, while user cancellations return to pending.
 Optional status notifications invalidate client data; displays reload persisted
 state so a delayed event cannot overwrite a replacement's status.
 

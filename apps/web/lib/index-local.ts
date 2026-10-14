@@ -5,7 +5,7 @@ import { prisma } from "@octopus/db";
 import { chunkText, shouldIndex, MAX_FILE_SIZE } from "@/lib/index-chunking";
 import { createEmbeddings } from "@/lib/embeddings";
 import { generateSparseVectors } from "@/lib/sparse-vector";
-import { upsertChunks, deleteRepoChunks } from "@/lib/qdrant";
+import { upsertChunks } from "@/lib/qdrant";
 import { type Ignore } from "@/lib/octopus-ignore";
 
 /**
@@ -57,7 +57,7 @@ export async function indexLocalBatch(
   fullName: string,
   organizationId: string,
   files: LocalFile[],
-  indexAttemptId: string,
+  claim: { attemptId: string; upload: { id: string } },
   ig?: Ignore,
 ): Promise<IndexLocalBatchResult> {
   let indexed = 0;
@@ -142,7 +142,7 @@ export async function indexLocalBatch(
     },
   }));
 
-  await upsertChunks(points, { repoId, indexAttemptId });
+  await upsertChunks(points, { repoId, indexAttemptId: claim.attemptId, uploadId: claim.upload.id });
 
   return { indexedInBatch: indexed, skippedInBatch: skipped, chunksInBatch: points.length };
 }
@@ -177,30 +177,13 @@ export async function prepareRepoForLocalIndex(
   });
 
   if (existing) {
-    // Only ever claim/wipe CLI-created rows (externalId "cli:<provider>:<fullName>").
+    // Only ever claim CLI-created rows (externalId "cli:<provider>:<fullName>").
     // A row with an installationId OR any non-`cli:` externalId is managed by the
     // platform webhook / GitHub-Action flow (the Action creates rows with a
-    // numeric externalId and installationId=null) — never hijack or wipe those.
+    // numeric externalId and installationId=null) — never hijack those.
     if (existing.installationId != null || !existing.externalId?.startsWith("cli:")) {
       return { ok: false, reason: "managed-by-platform", repoId: existing.id };
     }
-    // Re-index guard: if a concurrent run is mid-way (indexStatus="indexing"
-    // and updated within the IN_FLIGHT_WINDOW_MS staleness window), reject
-    // this batch instead of wiping the in-flight run's chunks. Without
-    // this, a second `octp review --index` collides with the first — run
-    // B's first batch deletes A's already-upserted chunks and resets
-    // counters, then A's later batches keep upserting under A's repoId,
-    // ending in a partially-mixed chunk set and inconsistent counters.
-    //
-    // ATOMIC CLAIM: the prior implementation read+returned then updated,
-    // which was a textbook TOCTOU — two concurrent runs both saw status
-    // != "indexing", both passed the guard, both wiped. The current
-    // pattern issues ONE `updateMany` that conditionally flips status
-    // to "indexing" only if the existing row is not already in-flight.
-    // Whichever caller's updateMany count comes back as 1 owns the run;
-    // count===0 means someone else flipped it first, so we return
-    // in-flight without wiping. Postgres serialises updateMany on the
-    // matching rows, so there is no window between the WHERE and SET.
     const inFlightCutoff = new Date(Date.now() - IN_FLIGHT_WINDOW_MS);
     const claim = await prisma.repository.updateMany({
       where: {
@@ -224,8 +207,6 @@ export async function prepareRepoForLocalIndex(
     if (claim.count === 0) {
       return { ok: false, reason: "in-flight", repoId: existing.id };
     }
-    // We hold the claim now — safe to wipe chunks without racing another run.
-    await deleteRepoChunks({ repoId: existing.id, uploadId: uploadState.id });
     return { ok: true, repoId: existing.id, reIndex: true, uploadId: uploadState.id };
   }
 
@@ -318,6 +299,7 @@ export async function recordLocalIndexProgress(
         totalFiles: claim.upload.totalFiles,
         ...(commit ? {
           indexStatus: "indexed",
+          activeIndexGeneration: claim.upload.id,
           indexDurationMs: startedAt != null ? Date.now() - startedAt : null,
         } : {}),
       },

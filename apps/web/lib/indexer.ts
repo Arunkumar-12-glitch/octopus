@@ -9,7 +9,7 @@ import * as bitbucketLib from "@/lib/bitbucket";
 import * as gitlabLib from "@/lib/gitlab";
 import * as forgejoLib from "@/lib/forgejo";
 import { ForgejoResponseTooLargeError } from "@/lib/forgejo-http";
-import { ensureCollection, upsertChunks, deleteRepoChunks, deleteRepoFileChunks } from "@/lib/qdrant";
+import { ensureCollection, upsertChunks, deleteRepoFileChunks } from "@/lib/qdrant";
 import { generateSparseVectors } from "@/lib/sparse-vector";
 import { parseOctopusIgnore, type Ignore } from "@/lib/octopus-ignore";
 import { shouldIndex, chunkText, treeBlobs, MAX_FILE_SIZE, exceedsMaxFileSize } from "@/lib/index-chunking";
@@ -513,9 +513,7 @@ export async function indexRepository(
   if (allChunks.length === 0) {
     if (emptyRepository) {
       if (signal?.aborted) throw new Error("Indexing cancelled");
-      // An empty snapshot must not leave searchable chunks from an older tree.
       await ensureCollection();
-      await deleteRepoChunks(owner);
     }
     signal?.throwIfAborted();
     onLog("No indexable content found", "warning");
@@ -535,11 +533,6 @@ export async function indexRepository(
   onLog("Preparing vector database...");
   await ensureCollection();
   onLog("Vector database ready", "success");
-
-  // 4. Delete old chunks for this repo
-  onLog("Cleaning up previous index data...");
-  await deleteRepoChunks(owner);
-  onLog("Previous data cleared", "success");
 
   // 5. Create embeddings in batches
   const texts = allChunks.map((c) => c.text);
@@ -637,7 +630,7 @@ async function loadIncrementalIgnore(
  * The repo stays "indexed" throughout — no downtime window.
  */
 export async function incrementalIndex(
-  owner: { repoId: string; updatedAt: Date },
+  owner: { repoId: string; activeIndexGeneration: string | null },
   fullName: string,
   defaultBranch: string,
   installationId: number,

@@ -211,7 +211,7 @@ for (const strict of [false, true]) {
 }
 let vectorWrites = 0;
 mock.module("@/lib/qdrant", () => ({
-  ensureCollection: async () => {}, deleteRepoChunks: async () => { vectorWrites++; },
+  ensureCollection: async () => {},
   upsertChunks: async () => { vectorWrites++; }, deleteRepoFileChunks: async () => {},
 }));
 mock.module("@/lib/embeddings", () => ({ createEmbeddings: async (texts: string[]) => texts.map(() => [0.1]) }));

@@ -9,13 +9,11 @@ mock.module("server-only", () => ({}));
 let mockDeleteRepoFileChunks = mock(() => Promise.resolve());
 let mockEnsureCollection = mock(() => Promise.resolve());
 let mockUpsertChunks = mock(() => Promise.resolve());
-let mockDeleteRepoChunks = mock(() => Promise.resolve());
 
 mock.module("@/lib/qdrant", () => ({
   deleteRepoFileChunks: (...args: unknown[]) => mockDeleteRepoFileChunks(...args),
   ensureCollection: () => mockEnsureCollection(),
   upsertChunks: (...args: unknown[]) => mockUpsertChunks(...args),
-  deleteRepoChunks: (...args: unknown[]) => mockDeleteRepoChunks(...args),
 }));
 
 mock.module("@/lib/embeddings", () => ({
@@ -58,7 +56,7 @@ mock.module("@/lib/octopus-ignore", () => ({
 // import after the mocks fixes the ordering (same as ai-router.test.ts).
 const { incrementalIndex } = await import("@/lib/indexer");
 
-const indexOwner = { repoId: "repo-1", updatedAt: new Date(0) };
+const indexOwner = { repoId: "repo-1", activeIndexGeneration: null };
 
 // ── Tests ──
 
@@ -67,7 +65,6 @@ describe("incrementalIndex", () => {
     mockDeleteRepoFileChunks = mock(() => Promise.resolve());
     mockEnsureCollection = mock(() => Promise.resolve());
     mockUpsertChunks = mock(() => Promise.resolve());
-    mockDeleteRepoChunks = mock(() => Promise.resolve());
     mockGetInstallationToken = mock(() => Promise.resolve("test-token"));
     mockGhGetFileContent = mock((_installationId: number, _owner: string, _repo: string, _branch: string, filePath: string) => {
       if (filePath === "src/index.ts") return Promise.resolve("export const hello = 'world';\n");

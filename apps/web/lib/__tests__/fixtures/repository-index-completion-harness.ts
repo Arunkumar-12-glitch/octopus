@@ -74,6 +74,15 @@ try {
       assert.deepEqual(await tx.$queryRaw`SELECT "indexAttemptId", "localIndexUpload" FROM repositories`, [
         { indexAttemptId: null, localIndexUpload: null }, { indexAttemptId: null, localIndexUpload: null },
       ]);
+      const generationMigration = await readFile(new URL("../../../../../packages/db/prisma/migrations/20261014230000_active_index_generation/migration.sql", import.meta.url), "utf8");
+      await tx.$executeRawUnsafe(generationMigration);
+      assert.deepEqual(await tx.$queryRaw`SELECT id, "indexedAt", name FROM repositories ORDER BY id`, before);
+      assert.deepEqual(await tx.$queryRaw`SELECT "activeIndexGeneration" FROM repositories`, [{ activeIndexGeneration: null }, { activeIndexGeneration: null }]);
+      const generationColumn = await tx.$queryRaw`
+        SELECT column_default, is_nullable, data_type FROM information_schema.columns
+        WHERE table_schema = ${schema} AND table_name = 'repositories' AND column_name = 'activeIndexGeneration'
+      `;
+      assert.deepEqual(generationColumn, [{ column_default: null, is_nullable: "YES", data_type: "text" }]);
       await tx.$executeRawUnsafe(`DROP SCHEMA "${schema}" CASCADE`);
     });
   } else if (scenario === "first" || scenario === "reindex" || scenario === "legacy") {
@@ -147,7 +156,10 @@ try {
     const succeeds = ["background", "background-setup-failure", "background-notification-failure", "background-unconfigured"].includes(scenario);
     assert.equal(result.firstIndexedAt !== null, succeeds);
     assert.equal(result.indexedAt !== null, succeeds);
-    if (succeeds) assert.equal(result.indexStatus, "indexed");
+    if (succeeds) {
+      assert.equal(result.indexStatus, "indexed");
+      assert.equal(result.activeIndexGeneration, indexAttemptId);
+    }
     if (scenario === "background-unconfigured") assert.equal(notificationAttempts, 2);
     if (scenario === "background-notification-failure") assert.equal(notificationAttempts, 2);
     if (scenario === "superseded") assert.equal(result.indexStatus, "pending");
@@ -237,7 +249,7 @@ try {
     let writes = 0;
     let full = false;
     mock.module("@/lib/qdrant", () => ({
-      ensureCollection: async () => {}, deleteRepoChunks: async () => {}, deleteRepoFileChunks: async () => {},
+      ensureCollection: async () => {}, deleteRepoFileChunks: async () => {},
       upsertChunks: async () => { writes++; },
     }));
     mock.module("@/lib/embeddings", () => ({ createEmbeddings: async (texts: string[]) => texts.map(() => [0.1]) }));
@@ -286,7 +298,7 @@ try {
     assert.equal(completed.firstIndexedAt !== null, scenario === "empty-incremental-full");
     assert.ok(completed.indexedAt);
   } else if (scenario.startsWith("local")) {
-    mock.module("@/lib/qdrant", () => ({ deleteRepoChunks: async () => {}, upsertChunks: async () => {} }));
+    mock.module("@/lib/qdrant", () => ({ upsertChunks: async () => {} }));
     mock.module("@/lib/embeddings", () => ({ createEmbeddings: async (texts: string[]) => texts.map(() => [0.1]) }));
     const { prepareRepoForLocalIndex, claimLocalIndexBatch, recordLocalIndexProgress, indexLocalBatch, markLocalIndexFailed } = await import("@/lib/index-local");
     const single = scenario === "local-single";
@@ -296,7 +308,7 @@ try {
     const files = [{ path: "a.ts", content: "export const a = 1;" }, { path: "b.ts", content: "export const b = 2;" }];
     const firstFiles = single ? files : files.slice(0, 1);
     const first = await claimLocalIndexBatch(id, 0, single ? 1 : 2, firstFiles, prepared.uploadId);
-    const delta = await indexLocalBatch(id, `local/${fixture}`, org.id, firstFiles, first.attemptId);
+    const delta = await indexLocalBatch(id, `local/${fixture}`, org.id, firstFiles, first);
     const progress = { indexedFiles: delta.indexedInBatch, totalChunks: delta.chunksInBatch, totalVectors: delta.chunksInBatch };
     await recordLocalIndexProgress(id, Date.now(), progress, single, first);
     if (scenario === "local-gap") {
@@ -318,6 +330,7 @@ try {
     }
     const result = await prisma.repository.findUniqueOrThrow({ where: { id } });
     const verified = ["local-single", "local-verified"].includes(scenario);
+    assert.equal(result.activeIndexGeneration, verified || scenario === "local-legacy" ? prepared.uploadId : null);
     assert.equal(result.firstIndexedAt !== null, verified);
     if (scenario === "local-legacy") assert.ok(result.indexedAt);
     if (scenario === "local-cancel") assert.equal(result.indexStatus, "pending");
