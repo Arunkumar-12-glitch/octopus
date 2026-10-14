@@ -1,5 +1,4 @@
 import "server-only";
-import { recordRepositoryIndexCompletion } from "@/lib/repository-index-completion";
 
 import crypto from "node:crypto";
 import { after, NextRequest, NextResponse } from "next/server";
@@ -375,9 +374,8 @@ export async function POST(request: NextRequest) {
             );
             await prisma.repository.update({
               where: { id: repo.id },
-              data: { indexStatus: "indexed" },
+              data: { indexedAt: new Date(), indexStatus: "indexed" },
             });
-            await recordRepositoryIndexCompletion(repo.id);
             console.log(`[webhook] PR #${prNumber} merged — incremental index: ${result.updatedFiles} updated, ${result.removedFiles} removed, ${result.newVectors} vectors`);
           } else {
             // Fallback: mark as stale if we can't get file list

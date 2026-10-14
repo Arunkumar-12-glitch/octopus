@@ -1,5 +1,5 @@
 import "server-only";
-import { recordRepositoryIndexCompletion } from "@/lib/repository-index-completion";
+import { runRepositoryIndex } from "@/lib/repository-index-completion";
 import { prisma } from "@octopus/db";
 import { pubby } from "@/lib/pubby";
 import { clearAbortController } from "@/lib/indexing-abort";
@@ -19,7 +19,7 @@ export async function runIndexingInBackground(
 ) {
   try {
     const { indexRepository: runIndexing } = await import("@/lib/indexer");
-    const stats = await runIndexing(
+    const stats = await runRepositoryIndex(repoId, () => runIndexing(
       repoId,
       fullName,
       defaultBranch,
@@ -28,23 +28,8 @@ export async function runIndexingInBackground(
       abortController.signal,
       provider,
       organizationId,
-    );
+    ), abortController.signal);
 
-    await prisma.repository.update({
-      where: { id: repoId },
-      data: {
-        indexStatus: "indexed",
-        totalFiles: stats.totalFiles,
-        indexedFiles: stats.indexedFiles,
-        totalChunks: stats.totalChunks,
-        totalVectors: stats.totalVectors,
-        contributorCount: stats.contributorCount,
-        contributors: JSON.parse(JSON.stringify(stats.contributors)),
-        indexDurationMs: stats.durationMs,
-        ...(stats.resolvedDefaultBranch ? { defaultBranch: stats.resolvedDefaultBranch } : {}),
-      },
-    });
-    await recordRepositoryIndexCompletion(repoId);
 
     emitLog(`Indexing completed for ${fullName}`, "success");
 
@@ -85,13 +70,10 @@ export async function runIndexingInBackground(
     clearAbortController(repoId);
 
     const errorMsg = error instanceof Error ? error.message : "Unknown error";
-    const isCancelled = errorMsg === "Indexing cancelled";
+    const isCancelled = abortController.signal.aborted || errorMsg === "Indexing cancelled";
 
     console.error(`Failed to index repo ${fullName}:`, error);
-    await prisma.repository.update({
-      where: { id: repoId },
-      data: { indexStatus: isCancelled ? "pending" : "failed" },
-    });
+
 
     if (isCancelled) {
       emitLog("Indexing cancelled by user", "warning");

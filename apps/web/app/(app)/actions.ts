@@ -706,7 +706,7 @@ export async function indexRepository(repoId: string): Promise<{ error?: string 
 
   await prisma.repository.update({
     where: { id: repoId },
-    data: { indexStatus: "indexing" },
+    data: { indexStatus: "indexing", indexAttemptId: null },
   });
 
   pubby.trigger(channel, "index-status", {
@@ -765,32 +765,18 @@ export async function cancelIndexing(repoId: string): Promise<{ error?: string }
     return { error: "Repository is not currently indexing." };
   }
 
-  const aborted = abortIndexing(repoId);
-
-  if (!aborted) {
-    // No in-memory controller found — the process is dead (e.g. server restart).
-    // Directly reset the DB status so the user isn't stuck.
-    try {
-      console.warn(
-        `[abort-indexing] No in-memory controller for repo ${repoId}, resetting DB status directly`,
-      );
-
-      await prisma.repository.update({
-        where: { id: repoId },
-        data: { indexStatus: "pending" },
-      });
-
-      revalidatePath("/repositories");
-    } catch (error) {
-      console.error(`[abort-indexing] Failed to reset status for repo ${repoId}:`, error);
-      return { error: "Failed to cancel indexing. Please try again." };
-    }
-
-    pubby.trigger(`presence-org-${repo.organizationId}`, "index-status", {
-      repoId,
-      status: "cancelled",
-    });
-  }
+  // Persist cancellation before broadcasting it. Workers on another process
+  // must fail the completion guard even if the cancellation event arrives late.
+  await prisma.repository.updateMany({
+    where: { id: repoId, indexStatus: "indexing" },
+    data: { indexStatus: "pending", indexAttemptId: null },
+  });
+  abortIndexing(repoId);
+  revalidatePath("/repositories");
+  pubby.trigger(`presence-org-${repo.organizationId}`, "index-status", {
+    repoId,
+    status: "cancelled",
+  });
 
   return {};
 }

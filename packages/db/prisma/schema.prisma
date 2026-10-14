@@ -316,6 +316,8 @@ model Repository {
   indexStatus    String   @default("pending") // pending | indexing | indexed | failed
   indexedAt      DateTime?
   firstIndexedAt DateTime?
+  indexAttemptId String?
+  localIndexUpload Json?
   indexedFiles   Int      @default(0)
   totalFiles     Int      @default(0)
   totalChunks    Int      @default(0)

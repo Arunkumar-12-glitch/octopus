@@ -1,5 +1,5 @@
 import "server-only";
-import { recordRepositoryIndexCompletion } from "@/lib/repository-index-completion";
+import { runRepositoryIndex } from "@/lib/repository-index-completion";
 import { prisma } from "@octopus/db";
 import { generateLocalReview } from "@/lib/review-core";
 import { indexRepository } from "@/lib/indexer";
@@ -87,7 +87,7 @@ export async function processCommunityReview(jobId: string): Promise<void> {
       // Atomic claim
       const claim = await prisma.repository.updateMany({
         where: { id: repo.id, indexStatus: { notIn: ["indexed", "indexing"] } },
-        data: { indexStatus: "indexing" },
+        data: { indexStatus: "indexing", indexAttemptId: null },
       });
 
       if (claim.count === 0) {
@@ -107,7 +107,7 @@ export async function processCommunityReview(jobId: string): Promise<void> {
           // failed/stale: try to reclaim
           const reclaim = await prisma.repository.updateMany({
             where: { id: repo.id, indexStatus: { notIn: ["indexed", "indexing"] } },
-            data: { indexStatus: "indexing" },
+            data: { indexStatus: "indexing", indexAttemptId: null },
           });
           if (reclaim.count === 0) {
             throw new Error(`Could not reclaim indexing for ${fullName}`);
@@ -125,7 +125,7 @@ export async function processCommunityReview(jobId: string): Promise<void> {
 
         LOG(jobId, "indexing repository...");
         try {
-          const indexStats = await indexRepository(
+          const indexStats = await runRepositoryIndex(repo.id, () => indexRepository(
             repo.id,
             fullName,
             repo.defaultBranch,
@@ -135,25 +135,8 @@ export async function processCommunityReview(jobId: string): Promise<void> {
             "github",
             job.organizationId,
             githubToken,
-          );
+          ));
 
-          await prisma.repository.update({
-            where: { id: repo.id },
-            data: {
-              indexStatus: "indexed",
-              indexedFiles: indexStats.indexedFiles,
-              totalFiles: indexStats.totalFiles,
-              totalChunks: indexStats.totalChunks,
-              totalVectors: indexStats.totalVectors,
-              indexDurationMs: indexStats.durationMs,
-              contributorCount: indexStats.contributorCount,
-              contributors: JSON.parse(JSON.stringify(indexStats.contributors)),
-              ...(indexStats.resolvedDefaultBranch
-                ? { defaultBranch: indexStats.resolvedDefaultBranch }
-                : {}),
-            },
-          });
-          await recordRepositoryIndexCompletion(repo.id);
 
           LOG(jobId, `index done: ${indexStats.indexedFiles} files, ${indexStats.totalVectors} vectors`);
 
@@ -186,10 +169,6 @@ export async function processCommunityReview(jobId: string): Promise<void> {
           }
         } catch (err) {
           ERR(jobId, "indexing failed:", err);
-          await prisma.repository.update({
-            where: { id: repo.id },
-            data: { indexStatus: "failed" },
-          });
           // Continue — generateLocalReview works without index
         }
       }

@@ -1,5 +1,5 @@
 import "server-only";
-import { recordRepositoryIndexCompletion } from "@/lib/repository-index-completion";
+import { runRepositoryIndex } from "@/lib/repository-index-completion";
 import { authenticateApiToken } from "@/lib/api-auth";
 import { prisma } from "@octopus/db";
 import { generateLocalReview } from "@/lib/review-core";
@@ -252,10 +252,10 @@ export async function POST(request: NextRequest) {
 
       await prisma.repository.update({
         where: { id: repo.id },
-        data: { indexStatus: "indexing" },
+        data: { indexStatus: "indexing", indexAttemptId: null },
       });
 
-      const indexStats = await indexRepository(
+      const indexStats = await runRepositoryIndex(repo.id, () => indexRepository(
         repo.id,
         fullName,
         ghRepoInfo.defaultBranch,
@@ -265,23 +265,8 @@ export async function POST(request: NextRequest) {
         "github",
         orgId,
         githubToken,
-      );
+      ));
 
-      await prisma.repository.update({
-        where: { id: repo.id },
-        data: {
-          indexStatus: "indexed",
-          indexedFiles: indexStats.indexedFiles,
-          totalFiles: indexStats.totalFiles,
-          totalChunks: indexStats.totalChunks,
-          totalVectors: indexStats.totalVectors,
-          indexDurationMs: indexStats.durationMs,
-          contributorCount: indexStats.contributorCount,
-          contributors: JSON.parse(JSON.stringify(indexStats.contributors)),
-          ...(indexStats.resolvedDefaultBranch ? { defaultBranch: indexStats.resolvedDefaultBranch } : {}),
-        },
-      });
-      await recordRepositoryIndexCompletion(repo.id);
 
       try {
         const { summary, purpose } = await summarizeRepository(repo.id, fullName, orgId);
@@ -302,7 +287,6 @@ export async function POST(request: NextRequest) {
       indexed = true;
     } catch (err) {
       ERR("inline indexing failed:", err);
-      await prisma.repository.update({ where: { id: repo.id }, data: { indexStatus: "failed" } });
     }
   }
 

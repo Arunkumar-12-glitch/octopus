@@ -27,7 +27,12 @@ mock.module("@/lib/indexing-abort", () => ({
 mock.module("@octopus/db", () => ({
   prisma: {
     $executeRaw: async () => 1,
+    $transaction: async (run: (tx: unknown) => Promise<unknown>) => run({
+      repository: { updateMany: async (args: { data: Record<string, unknown> }) => { writes.push(args); return { count: 1 }; } },
+      $executeRaw: async () => 1,
+    }),
     repository: {
+      findUniqueOrThrow: async () => ({ updatedAt: new Date(), indexStatus: "indexing" }),
       findMany: async (args: { where: Record<string, unknown> }) => { queries.push(args); return [{ id: "repo-1" }]; },
       findFirst: async (args: { where: Record<string, unknown> }) => { queries.push(args); return currentRow; },
       updateMany: async (args: { where: Record<string, unknown>; data: Record<string, unknown> }) => {

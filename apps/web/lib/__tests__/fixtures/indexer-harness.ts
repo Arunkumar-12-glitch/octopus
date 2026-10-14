@@ -6,6 +6,8 @@ const { ForgejoResponseTooLargeError } = await import("@/lib/forgejo-http");
 let details: { default_branch: string } | null = { default_branch: "main" };
 const deleted: string[] = [];
 const embedded: string[][] = [];
+let afterUpsert: (() => void) | undefined;
+let invalidEmbeddings = false;
 mock.module("@/lib/github", () => ({
   getInstallationToken: async () => "test-token",
   getRepositoryDetails: async () => details,
@@ -35,12 +37,12 @@ mock.module("@/lib/qdrant", () => ({
   ensureCollection: async () => {},
   deleteRepoChunks: async (id: string) => { deleted.push(id); },
   deleteRepoFileChunks: async () => {},
-  upsertChunks: async () => {},
+  upsertChunks: async () => { afterUpsert?.(); },
 }));
 mock.module("@/lib/embeddings", () => ({
   createEmbeddings: async (texts: string[]) => {
     embedded.push(texts);
-    return texts.map(() => [0.1]);
+    return invalidEmbeddings ? [] : texts.map(() => [0.1]);
   },
 }));
 const { indexRepository } = await import("@/lib/indexer");
@@ -142,3 +144,34 @@ assert.equal(requests.length, 0, "Forgejo must use its validated transport inste
 reset(); forgejoFailure = true;
 await assert.rejects(indexRepository("repo-1", "acme/new", "main", 0, undefined, undefined, "forgejo", "org-1"), /Forgejo unavailable/);
 assert.equal(deleted.length, 0, "failed fetch must preserve the prior index");
+
+// Incomplete snapshots must fail before replacing the previous searchable data.
+reset();
+responses.set("/git/trees/main?recursive=1", [200, { tree: [
+  { path: "index.ts", type: "blob", sha: "good", size: 35 },
+  { path: "missing.ts", type: "blob", sha: "bad", size: 35 },
+] }]);
+responses.set("/git/blobs/good", [200, { encoding: "base64", content: Buffer.from("export const good = 1;").toString("base64") }]);
+responses.set("/git/blobs/bad", [500, {}]);
+await assert.rejects(run, /Indexing incomplete/);
+assert.equal(deleted.length, 0, "a partially fetched tree must preserve the previous index");
+assert.equal(embedded.length, 0);
+
+reset();
+responses.set("/git/trees/main?recursive=1", [200, { tree: [], truncated: true }]);
+await assert.rejects(run, /partial repository tree/);
+assert.equal(deleted.length, 0);
+
+reset();
+responses.set("/git/trees/main?recursive=1", [200, { tree: [
+  { path: "index.ts", type: "blob", sha: "good", size: 35 },
+] }]);
+responses.set("/git/blobs/good", [200, { encoding: "base64", content: Buffer.from("export const good = 1;").toString("base64") }]);
+invalidEmbeddings = true;
+await assert.rejects(run, /embedding results/);
+invalidEmbeddings = false;
+const controller = new AbortController();
+afterUpsert = () => controller.abort(new Error("Indexing cancelled"));
+await assert.rejects(() => indexRepository("repo-1", "acme/new", "main", 123, undefined, controller.signal), /Indexing cancelled/);
+afterUpsert = undefined;
+console.log("Incomplete tree, file failure, embedding failure and late cancellation regressions passed");

@@ -1,3 +1,4 @@
+import "server-only";
 import { NextResponse } from "next/server";
 import { prisma } from "@octopus/db";
 import { authenticateApiToken } from "@/lib/api-auth";
@@ -6,6 +7,8 @@ import { isOrgOverSpendLimit } from "@/lib/cost";
 import { normaliseRemoteUrl } from "@/app/api/cli/repos/by-remote/route";
 import {
   IN_FLIGHT_WINDOW_MS,
+  claimLocalIndexBatch,
+  LocalIndexConflict,
   indexLocalBatch,
   markLocalIndexFailed,
   prepareRepoForLocalIndex,
@@ -65,6 +68,7 @@ type FirstBatchBody = {
 };
 
 type SubsequentBatchBody = {
+  uploadId?: string;
   repoId: string;
   totalBatches: number;
   batchIndex: number;
@@ -107,6 +111,7 @@ export async function POST(request: Request) {
   let repoId: string;
   let fullName: string;
   let startedAt: number | null;
+  let firstUploadId: string | undefined;
   if (isFirstBatch) {
     const first = body as FirstBatchBody;
     // Spend pre-check BEFORE prepareRepoForLocalIndex creates the row, so an
@@ -127,6 +132,7 @@ export async function POST(request: Request) {
       remote.provider,
       remote.fullName,
       first.defaultBranch || "main",
+      { totalBatches: first.totalBatches, totalFiles: first.totalFiles },
     );
     if (!prep.ok) {
       const message =
@@ -139,6 +145,7 @@ export async function POST(request: Request) {
       );
     }
     repoId = prep.repoId;
+    firstUploadId = prep.uploadId;
     fullName = remote.fullName;
     startedAt = Date.now();
     await writeAuditLog({
@@ -179,6 +186,17 @@ export async function POST(request: Request) {
     startedAt = null;
   }
 
+  let claim: Awaited<ReturnType<typeof claimLocalIndexBatch>>;
+  try {
+    claim = await claimLocalIndexBatch(repoId, body.batchIndex, body.totalBatches, body.files,
+      isFirstBatch ? firstUploadId : (body as SubsequentBatchBody).uploadId);
+  } catch (error) {
+    if (error instanceof LocalIndexConflict) {
+      return NextResponse.json({ error: error.message }, { status: 409 });
+    }
+    throw error;
+  }
+
   // Spend-limit gate — same invariant the sibling CLI review endpoints enforce.
   // Run AFTER repo resolution so that we have a repoId in hand. ALWAYS mark
   // the repo failed before returning, including on the first batch: by this
@@ -189,7 +207,7 @@ export async function POST(request: Request) {
   // re-index UI both rely on indexStatus="failed" to allow user-driven
   // recovery; "indexing" is treated as "in flight, do not touch."
   if (await isOrgOverSpendLimit(auth.org.id)) {
-    await markLocalIndexFailed(repoId).catch((e) =>
+    await markLocalIndexFailed(repoId, claim.attemptId).catch((e) =>
       console.error("[cli.index-local] failed to mark repo failed on 402:", e),
     );
     return NextResponse.json({ error: "Monthly spend limit reached" }, { status: 402 });
@@ -207,6 +225,7 @@ export async function POST(request: Request) {
         ...(isFirstBatch ? { totalFiles: (body as FirstBatchBody).totalFiles } : {}),
       },
       isLastBatch,
+      claim,
     );
 
     if (isLastBatch) {
@@ -224,6 +243,7 @@ export async function POST(request: Request) {
 
     return NextResponse.json({
       repoId,
+      uploadId: claim.upload.id,
       batchIndex: body.batchIndex,
       indexedInBatch: result.indexedInBatch,
       skippedInBatch: result.skippedInBatch,
@@ -231,7 +251,7 @@ export async function POST(request: Request) {
       done: isLastBatch,
     });
   } catch (e) {
-    await markLocalIndexFailed(repoId).catch(() => {});
+    await markLocalIndexFailed(repoId, claim.attemptId).catch(() => {});
     const detail = e instanceof Error ? e.message : String(e);
     console.error(`[cli.index-local] batch ${body.batchIndex}/${body.totalBatches} for ${fullName} failed:`, detail);
     const isProd = process.env.NODE_ENV === "production";
@@ -244,10 +264,10 @@ export async function POST(request: Request) {
 
 function validateBatch(body: Body): { ok: true } | { ok: false; error: string } {
   if (!body || typeof body !== "object") return { ok: false, error: "Empty body" };
-  if (typeof body.batchIndex !== "number" || body.batchIndex < 0) {
+  if (!Number.isSafeInteger(body.batchIndex) || body.batchIndex < 0) {
     return { ok: false, error: "batchIndex must be a non-negative integer" };
   }
-  if (typeof body.totalBatches !== "number" || body.totalBatches < 1) {
+  if (!Number.isSafeInteger(body.totalBatches) || body.totalBatches < 1) {
     return { ok: false, error: "totalBatches must be a positive integer" };
   }
   if (body.batchIndex >= body.totalBatches) {
@@ -272,11 +292,14 @@ function validateBatch(body: Body): { ok: true } | { ok: false; error: string } 
     if (typeof first.remoteUrl !== "string" || !first.remoteUrl.trim()) {
       return { ok: false, error: "first batch must include remoteUrl" };
     }
-    if (typeof first.totalFiles !== "number" || first.totalFiles < 0) {
+    if (!Number.isSafeInteger(first.totalFiles) || first.totalFiles < 1) {
       return { ok: false, error: "first batch must include totalFiles" };
     }
   } else {
     const sub = body as SubsequentBatchBody;
+    if (sub.uploadId !== undefined && (typeof sub.uploadId !== "string" || !sub.uploadId)) {
+      return { ok: false, error: "uploadId must be a non-empty string" };
+    }
     if (typeof sub.repoId !== "string" || !sub.repoId.trim()) {
       return { ok: false, error: "subsequent batches must include repoId" };
     }

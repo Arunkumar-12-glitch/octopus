@@ -1,5 +1,5 @@
 import "server-only";
-import { recordRepositoryIndexCompletion } from "@/lib/repository-index-completion";
+import { runRepositoryIndex } from "@/lib/repository-index-completion";
 import { prisma } from "@octopus/db";
 import { enqueue } from "@/lib/queue";
 import type { LogLevel } from "@/lib/indexer";
@@ -70,7 +70,7 @@ export async function processRepositoryIndex(job: RepositoryIndexJob) {
   // Share the reviewer's claim so a first PR and discovery cannot both index.
   const claim = await prisma.repository.updateMany({
     where: { id: repo.id, organizationId: job.organizationId, ...needsIndex },
-    data: { indexStatus: "indexing" },
+    data: { indexStatus: "indexing", indexAttemptId: null },
   });
   if (!claim.count) return;
 
@@ -88,33 +88,14 @@ export async function processRepositoryIndex(job: RepositoryIndexJob) {
     const { indexRepository } = await import("@/lib/indexer");
     await deleteSyncLogs(job.organizationId, repo.id);
     await notify("indexing");
-    const stats = await indexRepository(
+    const stats = await runRepositoryIndex(repo.id, () => indexRepository(
       repo.id, repo.fullName, repo.defaultBranch, installationId ?? 0, log,
       controller.signal, repo.provider, job.organizationId,
-    );
-    await prisma.repository.update({
-      where: { id: repo.id },
-      data: {
-        indexStatus: "indexed",
-        totalFiles: stats.totalFiles,
-        indexedFiles: stats.indexedFiles,
-        totalChunks: stats.totalChunks,
-        totalVectors: stats.totalVectors,
-        contributorCount: stats.contributorCount,
-        contributors: JSON.parse(JSON.stringify(stats.contributors)),
-        indexDurationMs: stats.durationMs,
-        ...(stats.resolvedDefaultBranch ? { defaultBranch: stats.resolvedDefaultBranch } : {}),
-      },
-    });
-    await recordRepositoryIndexCompletion(repo.id);
+    ), controller.signal);
     log(`Indexing complete: ${stats.indexedFiles} files, ${stats.totalVectors} vectors`, "success");
     await notify("indexed");
   } catch (error) {
     const isCancelled = controller.signal.aborted && !timedOut;
-    await prisma.repository.updateMany({
-      where: { id: repo.id, organizationId: job.organizationId, indexStatus: "indexing" },
-      data: { indexStatus: isCancelled ? "pending" : "failed" },
-    });
     log(`Indexing failed: ${error instanceof Error ? error.message : String(error)}`, "error");
     await notify(isCancelled ? "cancelled" : "failed");
     if (!isCancelled) throw error;
