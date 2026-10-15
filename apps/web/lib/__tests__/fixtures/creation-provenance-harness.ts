@@ -39,7 +39,15 @@ let magicUrl = "";
 mock.module("@/lib/email", () => ({ sendEmail: async (message: { html: string }) => {
   magicUrl = message.html.match(/href="([^"]+)"/)?.[1] ?? "";
 } }));
-const { prisma } = await import("@octopus/db");
+const database = await import("@octopus/db");
+const { prisma } = database;
+let transactionOverride: typeof prisma.$transaction | undefined;
+const facade = new Proxy(prisma, {
+  get(target, key) {
+    return key === "$transaction" && transactionOverride ? transactionOverride : Reflect.get(target, key);
+  },
+});
+mock.module("@octopus/db", () => ({ ...database, prisma: facade }));
 const provenance = await import("@/lib/creation-provenance");
 const { createOrgForUser } = await import("@/lib/org-create");
 const { canUserCreateOrg, hasEverOwnedOrg } = await import("@/lib/org-limits");
@@ -122,10 +130,50 @@ try {
     }
     let created;
     if (scenario === "concurrent-organizations") {
-      const pair = await Promise.all([createOrgForUser(person.id, "Fixture"), createOrgForUser(person.id, "Fixture")]);
-      assert.deepEqual(pair.map(row => row.creatorFirstOrganization).sort(), [false, true]);
+      // Hold both transactions after the provenance count. Neither may depend
+      // on the other transaction committing before it reaches this point.
+      const transaction = prisma.$transaction.bind(prisma);
+      let reached = 0;
+      let release!: () => void;
+      let reject!: (error: Error) => void;
+      let timedOut = false;
+      const bothCounted = new Promise<void>((resolve, fail) => { release = resolve; reject = fail; });
+      const timeout = setTimeout(() => {
+        timedOut = true;
+        reject(new Error("Concurrent creation could not reach the count"));
+      }, 5_000);
+      transactionOverride = (async (run: (tx: unknown) => Promise<unknown>) =>
+        transaction(async tx => run(new Proxy(tx, {
+          get(target, key) {
+            if (key !== "organizationMember") return Reflect.get(target, key);
+            return new Proxy(tx.organizationMember, {
+              get(member, operation) {
+                if (operation !== "count") return Reflect.get(member, operation);
+                return async (args: Parameters<typeof tx.organizationMember.count>[0]) => {
+                  const count = await tx.organizationMember.count(args);
+                  if (Object.keys(args?.where ?? {}).length === 1 && args?.where?.userId === person.id) {
+                    if (++reached === 2) release();
+                    await bothCounted;
+                  }
+                  return count;
+                };
+              },
+            });
+          },
+        })), { timeout: 10_000 })) as typeof prisma.$transaction;
+      let pair;
+      try {
+        pair = await Promise.all([createOrgForUser(person.id, "Fixture"), createOrgForUser(person.id, "Fixture")]);
+      } finally {
+        clearTimeout(timeout);
+        transactionOverride = undefined;
+      }
+      assert.equal(timedOut, false);
+      assert.equal(reached, 2);
+      assert.equal(new Set(pair.map(row => row.id)).size, 2);
+      assert.equal(await prisma.organizationMember.count({ where: { userId: person.id } }), 2);
       assert.ok(pair.every(row => row.creationSource === "auto_default"));
-      created = pair.find(row => row.creatorFirstOrganization)!;
+      created = pair[0];
     } else if (scenario.startsWith("auto-")) {
       const path = scenario === "auto-layout" ? "apps/web/app/(app)/layout.tsx"
         : scenario === "auto-profile" ? "apps/web/app/(app)/complete-profile/actions.ts" : "apps/web/app/api/cli/auth/orgs/route.ts";
@@ -154,7 +202,9 @@ try {
       });
     } else created = await createOrgForUser(person.id, "Fixture");
     assert.equal(created.creationSource, scenario === "user-created" ? "user_created" : "auto_default");
-    assert.equal(created.creatorFirstOrganization, scenario === "membership-unavailable" ? null : !["second", "removed-member"].includes(scenario));
+    if (scenario !== "concurrent-organizations") {
+      assert.equal(created.creatorFirstOrganization, scenario === "membership-unavailable" ? null : !["second", "removed-member"].includes(scenario));
+    }
   } else {
     const { auth } = await import("@/lib/auth");
     // No provider network calls: exercise the real social endpoint and SQL adapter.

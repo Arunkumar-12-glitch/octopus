@@ -65,8 +65,6 @@ export async function organizationCreationProvenance(
   try {
     await tx.$executeRawUnsafe("SAVEPOINT creation_provenance");
     savepoint = true;
-    // Serialize creations for this user before observing membership history.
-    await tx.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${userId} FOR UPDATE`;
     creatorFirstOrganization = await tx.organizationMember.count({ where: { userId } }) === 0;
   } catch {
     if (savepoint) await tx.$executeRawUnsafe("ROLLBACK TO SAVEPOINT creation_provenance");
