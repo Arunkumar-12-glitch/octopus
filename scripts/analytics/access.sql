@@ -57,7 +57,8 @@ SELECT 'octopus:repo:' || id AS repository_id,
   CASE WHEN provider IN ('github','gitlab','bitbucket','forgejo') THEN provider ELSE 'other' END AS provider,
   "createdAt" AS connected_at, "isActive" AS is_active, "autoReview" AS auto_review,
   CASE WHEN "indexStatus" IN ('pending','indexing','indexed','failed') THEN "indexStatus" ELSE 'unknown' END AS index_status,
-  "indexedAt" AS latest_index_at
+  "indexedAt" AS latest_index_at,
+  "firstIndexedAt" AS first_index_at
 FROM public.repositories;
 
 CREATE VIEW octopus_analytics.review_milestones_v1 WITH (security_barrier = true) AS
