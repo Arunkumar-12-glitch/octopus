@@ -122,10 +122,10 @@ content, full audit metadata and payment-provider objects.
 | `octopus_analytics.review_milestones_v1` | `pull_request_id` | First recorded PR/publication; strict activation explicitly unknown. |
 | `octopus_analytics.cash_events_v1` | `event_id` | Deduplicated observed purchases/refunds with integer minor-unit amount and currency. |
 
-first_index_at is NULL when no first successful index is on record. That
-can mean either: the repository has had no successful index yet, or it was
-indexed but before recording started on 15 Oct 2026, or through an
-unverified local upload. NULL alone can't tell these apart.
+`first_index_at` is NULL when no first successful index is on record. That
+can mean any of these: the repository has had no successful index yet; it
+was indexed before recording started on 15 Oct 2026; or its first index
+came through an unverified local upload. NULL alone can't tell these apart.
 
 A first successful index is a complete, non-empty, verified full index; see
 [PR #934](https://github.com/octopusreview/octopus/pull/934).
