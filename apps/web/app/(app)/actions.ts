@@ -1,6 +1,8 @@
 "use server";
 
 import "server-only";
+
+import { organizationCreationProvenance } from "@/lib/creation-provenance";
 import { isActionId } from "@/lib/action-input";
 import { isTextFormData } from "@/lib/form-input";
 import { headers, cookies } from "next/headers";
@@ -154,6 +156,7 @@ export async function createOrganization(
 
       const org = await tx.organization.create({
         data: {
+          ...await organizationCreationProvenance(tx, user.id, "user_created"),
           name: name.trim(),
           slug,
           members: {

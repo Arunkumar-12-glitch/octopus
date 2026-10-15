@@ -160,3 +160,9 @@ jobs:
         working-directory: apps/web
         env:
           RUN_FIRST_INDEX_DB_TESTS: "1"
+
+      - name: Test creation provenance against PostgreSQL
+        run: bun test lib/__tests__/creation-provenance.test.ts
+        working-directory: apps/web
+        env:
+          RUN_CREATION_PROVENANCE_DB_TESTS: "1"
