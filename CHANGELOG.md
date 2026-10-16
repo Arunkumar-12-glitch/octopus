@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-10-16
+
+### Added
+
+- Record how new accounts and organizations were created to improve onboarding analytics. Historical or uncertain provenance stays unknown.
+- Track review attempts and distinguish published, incomplete, failed and superseded outcomes.
+
+### Fixed
+
+- Keep superseded large-review attempts from appearing as successfully completed reviews.
+- Index account and invitation lookups used during signup to avoid scanning growing tables.
+
+### Upgrade notes
+
+- Apply the three additive creation-provenance, review-outcome and lookup-index migrations before updating web and review workers. No historical records are backfilled.
+- The restricted analytics repository view can now expose the first verified index timestamp. Applying the view update and refreshing PostHog discovery remain separate operator actions; this application rollout does not change analytics schedules or access.
+- Rolling back the application image to 1.2.17 is compatible with the additive schema. Retain the new tables, columns and indexes.
+
 ## [1.2.17] - 2026-10-14
 
 ### Fixed
