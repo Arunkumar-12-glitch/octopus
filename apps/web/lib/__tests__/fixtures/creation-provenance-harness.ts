@@ -130,7 +130,7 @@ try {
     }
     let created;
     if (scenario === "concurrent-organizations") {
-      // Hold both transactions after the provenance count. Neither may depend
+      // Hold both transactions after the provenance lookup. Neither may depend
       // on the other transaction committing before it reaches this point.
       const transaction = prisma.$transaction.bind(prisma);
       let reached = 0;
@@ -140,7 +140,7 @@ try {
       const bothCounted = new Promise<void>((resolve, fail) => { release = resolve; reject = fail; });
       const timeout = setTimeout(() => {
         timedOut = true;
-        reject(new Error("Concurrent creation could not reach the count"));
+        reject(new Error("Concurrent creation could not reach the lookup"));
       }, 5_000);
       transactionOverride = (async (run: (tx: unknown) => Promise<unknown>) =>
         transaction(async tx => run(new Proxy(tx, {
@@ -148,14 +148,14 @@ try {
             if (key !== "organizationMember") return Reflect.get(target, key);
             return new Proxy(tx.organizationMember, {
               get(member, operation) {
-                if (operation !== "count") return Reflect.get(member, operation);
-                return async (args: Parameters<typeof tx.organizationMember.count>[0]) => {
-                  const count = await tx.organizationMember.count(args);
+                if (operation !== "findFirst") return Reflect.get(member, operation);
+                return async (args: Parameters<typeof tx.organizationMember.findFirst>[0]) => {
+                  const membership = await tx.organizationMember.findFirst(args);
                   if (Object.keys(args?.where ?? {}).length === 1 && args?.where?.userId === person.id) {
                     if (++reached === 2) release();
                     await bothCounted;
                   }
-                  return count;
+                  return membership;
                 };
               },
             });
@@ -196,7 +196,7 @@ try {
       created = await prisma.organization.findFirstOrThrow();
     } else if (scenario === "membership-unavailable") {
       created = await prisma.$transaction(async tx => {
-        const proxy = { ...tx, organizationMember: { count: () => tx.$executeRawUnsafe("SELECT * FROM nonexistent_provenance_fixture") } };
+        const proxy = { ...tx, organizationMember: { findFirst: () => tx.$executeRawUnsafe("SELECT * FROM nonexistent_provenance_fixture") } };
         const fields = await provenance.organizationCreationProvenance(proxy as unknown as typeof tx, person.id, "auto_default");
         return tx.organization.create({ data: { ...fields, name: "Fixture", slug: fixture } });
       });

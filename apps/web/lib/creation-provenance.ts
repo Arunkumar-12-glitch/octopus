@@ -53,7 +53,7 @@ export async function userCreationProvenance(email: string, ctx?: CreationContex
   };
 }
 
-/** Count every membership, including removed memberships, just before INSERT. */
+/** Check for any membership, including removed memberships, just before INSERT. */
 export async function organizationCreationProvenance(
   tx: Prisma.TransactionClient,
   userId: string,
@@ -65,7 +65,7 @@ export async function organizationCreationProvenance(
   try {
     await tx.$executeRawUnsafe("SAVEPOINT creation_provenance");
     savepoint = true;
-    creatorFirstOrganization = await tx.organizationMember.count({ where: { userId } }) === 0;
+    creatorFirstOrganization = await tx.organizationMember.findFirst({ where: { userId }, select: { id: true } }) === null;
   } catch {
     if (savepoint) await tx.$executeRawUnsafe("ROLLBACK TO SAVEPOINT creation_provenance");
   } finally {
