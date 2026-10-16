@@ -1,4 +1,5 @@
 import "server-only";
+import { recordReviewAdmissionAfterCommit } from "./review-attempt-outcome";
 import { prisma, Prisma, type PullRequest } from "@octopus/db";
 import * as github from "@/lib/github";
 import * as bitbucket from "@/lib/bitbucket";
@@ -48,9 +49,13 @@ async function currentProviderHead(params: ReviewRequestParams): Promise<string 
 
 /** Validate provider head before atomically replacing the current request. */
 export async function admitReviewRequest(params: ReviewRequestParams, client: Prisma.TransactionClient = prisma): Promise<AdmissionResult> {
-  return params.provider === "forgejo"
+  const admission = await (params.provider === "forgejo"
     ? forgejo.runWithForgejoRepository(params.repoId, () => admitReviewRequestInternal(params, client))
-    : admitReviewRequestInternal(params, client);
+    : admitReviewRequestInternal(params, client));
+  if (admission.started && client === prisma) {
+    recordReviewAdmissionAfterCommit(admission.pullRequest.id, admission.pullRequest.reviewRequestVersion);
+  }
+  return admission;
 }
 
 async function admitReviewRequestInternal(params: ReviewRequestParams, client: Prisma.TransactionClient): Promise<AdmissionResult> {

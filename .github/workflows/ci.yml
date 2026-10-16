@@ -166,3 +166,9 @@ jobs:
         working-directory: apps/web
         env:
           RUN_CREATION_PROVENANCE_DB_TESTS: "1"
+
+      - name: Test stable review records against PostgreSQL
+        run: bun test lib/__tests__/review-attempt-outcome.test.ts
+        working-directory: apps/web
+        env:
+          RUN_REVIEW_OUTCOME_DB_TESTS: "1"
