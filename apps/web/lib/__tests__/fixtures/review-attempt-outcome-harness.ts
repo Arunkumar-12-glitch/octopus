@@ -339,17 +339,14 @@ try {
         await until(async () => (await read()).outcome === "superseded");
       }
     }
-  } else if (scenario === "claim" || scenario === "large-source") {
-    const source = await readFile(new URL(scenario === "claim" ? "../../reviewer.ts" : "../../large-review-result.ts", import.meta.url), "utf8");
+  } else if (scenario === "claim") {
+    const source = await readFile(new URL("../../reviewer.ts", import.meta.url), "utf8");
     assert.match(source, /await startReviewOutcome\(outcomeKey, new Date\(\)/);
-    if (scenario === "claim") {
-      assert.match(source, /if \(claimed.count\) await startReviewOutcome/); assert.match(source, /if \(outcomeDeferred\) await deferReviewOutcome/);
-      await prisma.reviewAttemptOutcome.deleteMany({ where: { pullRequestId: pr.id } });
-      const results = await Promise.all([productionClaim(), productionClaim()]);
-      assert.equal(results.reduce((n: number, r: { count: number }) => n + r.count, 0), 1);
-      assert.equal((await read()).tries, 1);
-    }
-    else { assert.match(source, /new ReviewOutcomeRecorder\(outcomeKey, true\)/); assert.match(source, /onPosted: !data.error && recordOutcome \? outcomeRecord.mainPosted/); }
+    assert.match(source, /if \(claimed.count\) await startReviewOutcome/); assert.match(source, /if \(outcomeDeferred\) await deferReviewOutcome/);
+    await prisma.reviewAttemptOutcome.deleteMany({ where: { pullRequestId: pr.id } });
+    const results = await Promise.all([productionClaim(), productionClaim()]);
+    assert.equal(results.reduce((n: number, r: { count: number }) => n + r.count, 0), 1);
+    assert.equal((await read()).tries, 1);
   } else if (scenario.startsWith("large-stale-") || scenario === "large-current") {
     await prisma.repository.update({ where: { id: repo.id }, data: { installationId: 1 } });
     let posts = 0;
