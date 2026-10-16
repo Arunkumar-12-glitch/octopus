@@ -104,9 +104,8 @@ The CLI implementation is maintained separately.
 
 Rows with an earlier `indexedAt` and no `firstIndexedAt` retain an unknown first
 date. Do not backfill from the latest date or present null as “never indexed.”
-Exporting this field in the restricted analytics views remains separate
-reviewed work under #924; this change does not alter live
-PostHog sources, schedules or grants.
+The restricted repository view exports this field as `first_index_at`; importing
+the new column into an existing PostHog source requires the operator step below.
 
 ## Restricted source dataset
 
@@ -119,9 +118,17 @@ content, full audit metadata and payment-provider objects.
 | View | Primary identifier | Purpose |
 | --- | --- | --- |
 | `octopus_analytics.organizations_v1` | `organization_id` | Organisation cohort and current eligibility flags. |
-| `octopus_analytics.repositories_v1` | `repository_id` | Provider, repository setup and latest index state. |
+| `octopus_analytics.repositories_v1` | `repository_id` | Provider, repository setup, latest index state and `first_index_at`. |
 | `octopus_analytics.review_milestones_v1` | `pull_request_id` | First recorded PR/publication; strict activation explicitly unknown. |
 | `octopus_analytics.cash_events_v1` | `event_id` | Deduplicated observed purchases/refunds with integer minor-unit amount and currency. |
+
+`first_index_at` is NULL when no first successful index is on record. That
+can mean any of these: the repository has had no successful index yet; it
+was indexed before recording started on 15 Oct 2026; or its first index
+came through an unverified local upload. NULL alone can't tell these apart.
+
+A first successful index is a complete, non-empty, verified full index; see
+[PR #934](https://github.com/octopusreview/octopus/pull/934).
 
 Rows from different source configurations with identical cash event IDs and
 facts collapse to one. Conflicting facts for the same event ID are excluded
@@ -136,6 +143,12 @@ control themselves. PostgreSQL system metadata and permitted temporary objects
 are outside the business-table allowlist.
 
 ## Operator setup
+
+For an existing installation, run
+`scripts/analytics/update-repositories-first-index.sql` once through the existing
+operator connection, then refresh the PostHog source schema so `first_index_at`
+is imported. The script preserves the existing view grants and refuses a missing
+schema or view. It is safe to repeat. Fresh installations use `access.sql` below.
 
 1. Confirm the target database, installed PostHog source/view support, private
    reachability, shared-project visibility and current backup. Check existing

@@ -15,11 +15,11 @@ DO $$ BEGIN
   IF current_setting('server_version_num')::int / 10000 <> 17 THEN RAISE EXCEPTION 'PostgreSQL 17 required'; END IF;
 END $$;
 CREATE TABLE organizations (id text PRIMARY KEY,"createdAt" timestamp,type int,"bannedAt" timestamp,"deletedAt" timestamp,"anthropicApiKey" text);
-CREATE TABLE repositories (id text PRIMARY KEY,"organizationId" text,provider text,"createdAt" timestamp,"isActive" boolean,"autoReview" boolean,"indexStatus" text,"indexedAt" timestamp);
+CREATE TABLE repositories (id text PRIMARY KEY,"organizationId" text,provider text,"createdAt" timestamp,"isActive" boolean,"autoReview" boolean,"indexStatus" text,"indexedAt" timestamp,"firstIndexedAt" timestamp);
 CREATE TABLE pull_requests (id text PRIMARY KEY,"repositoryId" text,"createdAt" timestamp,"firstReviewCompletedAt" timestamp,status text,"reviewBody" text);
 CREATE TABLE marketing_conversions ("organizationId" text,environment text,status text,kind text,payload text);
 INSERT INTO organizations VALUES ('one','2026-09-01',1,null,null,'DO-NOT-EXPORT'),('banned','2026-09-01',1,now(),null,'PRIVATE');
-INSERT INTO repositories VALUES ('repo','one','github','2026-09-02',true,true,'indexed','2026-09-09');
+INSERT INTO repositories VALUES ('repo','one','github','2026-09-02',true,true,'indexed','2026-09-09','2026-09-09');
 INSERT INTO pull_requests VALUES ('pr','repo','2026-09-03','2026-09-04','completed','private source content');
 INSERT INTO marketing_conversions VALUES ('one','live','delivered','purchase',json_build_object('schemaVersion',1,'eventId','payment_'||repeat('a',64),'eventType','purchase','currency','USD','amountMinor','1000','occurredAt','2026-09-05T00:00:00Z')::text);
 INSERT INTO marketing_conversions SELECT * FROM marketing_conversions;
@@ -31,6 +31,17 @@ SELECT 'one','live','delivered','purchase',payload FROM (VALUES
   (json_build_object('schemaVersion',1,'eventId','payment_'||repeat('c',64),'eventType','purchase','currency','USD','amountMinor','1000','occurredAt','not a date')::text)
 ) AS invalid(payload);
 SQL
+# Updates must refuse missing prerequisites without installing anything.
+if output=$(psql_fixture < update-repositories-first-index.sql 2>&1); then
+  echo 'Update unexpectedly accepted a missing schema' >&2; exit 1
+fi
+[[ "$output" == *'Analytics schema missing; install access.sql before this update'* ]]
+psql_fixture -c 'CREATE SCHEMA octopus_analytics'
+if output=$(psql_fixture < update-repositories-first-index.sql 2>&1); then
+  echo 'Update unexpectedly accepted a missing view' >&2; exit 1
+fi
+[[ "$output" == *'Analytics repositories_v1 view missing; install access.sql before this update'* ]]
+psql_fixture -c 'DROP SCHEMA octopus_analytics'
 # Column grants must reject installation and roll back its role and schema.
 psql_fixture -c 'GRANT SELECT ("anthropicApiKey") ON organizations TO PUBLIC'
 if output=$(psql_fixture < access.sql 2>&1); then
@@ -50,10 +61,13 @@ END $$;
 REVOKE SELECT ("anthropicApiKey") ON organizations FROM PUBLIC;
 SQL
 psql_fixture < access.sql
-psql_fixture <<'SQL'
+check_reader() {
+  psql_fixture <<'SQL'
 SET ROLE octopus_analytics_reader;
 DO $$ BEGIN
   IF (SELECT count(*) FROM octopus_analytics.organizations_v1 WHERE provisional_eligible) <> 1 THEN RAISE EXCEPTION 'cohort'; END IF;
+  IF (SELECT first_index_at FROM octopus_analytics.repositories_v1 WHERE repository_id='octopus:repo:repo')
+    IS DISTINCT FROM timestamp '2026-09-09' THEN RAISE EXCEPTION 'first index projection'; END IF;
   IF (SELECT count(*) FROM octopus_analytics.cash_events_v1) <> 1 THEN RAISE EXCEPTION 'dedup'; END IF;
   IF (SELECT amount_minor FROM octopus_analytics.cash_events_v1) <> 1000 THEN RAISE EXCEPTION 'cash'; END IF;
   IF (SELECT substantive_activation_at FROM octopus_analytics.review_milestones_v1) IS NOT NULL THEN RAISE EXCEPTION 'false activation'; END IF;
@@ -64,6 +78,60 @@ DO $$ BEGIN
   IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='octopus_analytics' AND column_name IN ('anthropicApiKey','reviewBody','payload')) THEN RAISE EXCEPTION 'unsafe projection'; END IF;
 END $$;
 RESET ROLE;
+SQL
+}
+# Fresh installs expose the new column and retain all deny checks.
+check_reader
+psql_fixture <<'SQL'
+CREATE TABLE analytics_fixture_fresh_view AS
+SELECT pg_get_viewdef(c.oid) AS definition, c.relowner, c.relacl, c.reloptions,
+  (SELECT jsonb_agg(jsonb_build_array(a.attname, a.atttypid, a.atttypmod, a.attcollation) ORDER BY a.attnum)
+   FROM pg_attribute a WHERE a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped) AS columns
+FROM pg_class c WHERE c.oid='octopus_analytics.repositories_v1'::regclass;
+-- Restore the previous installed view and its existing table-level reader grant.
+DROP VIEW octopus_analytics.repositories_v1;
+CREATE VIEW octopus_analytics.repositories_v1 WITH (security_barrier = true) AS
+SELECT 'octopus:repo:' || id AS repository_id,
+  'octopus:org:' || "organizationId" AS organization_id,
+  CASE WHEN provider IN ('github','gitlab','bitbucket','forgejo') THEN provider ELSE 'other' END AS provider,
+  "createdAt" AS connected_at, "isActive" AS is_active, "autoReview" AS auto_review,
+  CASE WHEN "indexStatus" IN ('pending','indexing','indexed','failed') THEN "indexStatus" ELSE 'unknown' END AS index_status,
+  "indexedAt" AS latest_index_at
+FROM public.repositories;
+GRANT SELECT ON octopus_analytics.repositories_v1 TO octopus_analytics_reader;
+CREATE TABLE analytics_fixture_upgrade_view AS
+SELECT oid AS view_oid, relowner, relacl, reloptions FROM pg_class
+WHERE oid='octopus_analytics.repositories_v1'::regclass;
+DO $$ BEGIN
+  IF EXISTS (SELECT FROM information_schema.columns WHERE table_schema='octopus_analytics'
+    AND table_name='repositories_v1' AND column_name='first_index_at') THEN
+    RAISE EXCEPTION 'previous view already exposes first_index_at';
+  END IF;
+END $$;
+SQL
+for _ in 1 2; do
+  psql_fixture < update-repositories-first-index.sql
+  psql_fixture <<'SQL'
+DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT FROM pg_class c CROSS JOIN analytics_fixture_fresh_view fresh
+      CROSS JOIN analytics_fixture_upgrade_view previous
+    WHERE c.oid='octopus_analytics.repositories_v1'::regclass AND c.oid=previous.view_oid
+      AND c.relowner=previous.relowner AND c.relacl IS NOT DISTINCT FROM previous.relacl
+      AND c.reloptions IS NOT DISTINCT FROM previous.reloptions
+      AND c.relowner=fresh.relowner AND c.relacl IS NOT DISTINCT FROM fresh.relacl
+      AND c.reloptions IS NOT DISTINCT FROM fresh.reloptions
+      AND 'security_barrier=true'=ANY(c.reloptions)
+      AND pg_get_viewdef(c.oid)=fresh.definition
+      AND (SELECT jsonb_agg(jsonb_build_array(a.attname, a.atttypid, a.atttypmod, a.attcollation) ORDER BY a.attnum)
+           FROM pg_attribute a WHERE a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped)=fresh.columns
+  ) THEN RAISE EXCEPTION 'upgraded view differs or lost identity, owner, barrier or grants'; END IF;
+END $$;
+SQL
+  check_reader
+done
+psql_fixture -c 'DROP TABLE analytics_fixture_fresh_view, analytics_fixture_upgrade_view'
+psql_fixture <<'SQL'
 -- Same event ID with conflicting facts must disappear rather than pick a row.
 INSERT INTO marketing_conversions VALUES ('one','live','delivered','purchase',json_build_object('schemaVersion',1,'eventId','payment_'||repeat('a',64),'eventType','purchase','currency','USD','amountMinor','2000','occurredAt','2026-09-05T00:00:00Z')::text);
 DO $$ BEGIN
@@ -97,9 +165,9 @@ INSERT INTO repositories
 SELECT 'scale-repo-'||i||'-'||j, 'scale-'||i, 'github',
   CASE WHEN j=1 THEN timestamp '2026-09-13'
     WHEN i%5 IN (0,4) THEN timestamp '2026-10-01' ELSE timestamp '2026-09-14' END,
-  true, true, 'indexed', NULL
+  true, true, 'indexed', NULL, NULL
 FROM generate_series(1,10000) i CROSS JOIN generate_series(1,2) j;
-INSERT INTO repositories VALUES ('immature-repo','immature','github','2026-09-28',true,true,'pending',NULL);
+INSERT INTO repositories VALUES ('immature-repo','immature','github','2026-09-28',true,true,'pending',NULL,NULL);
 INSERT INTO pull_requests
 SELECT 'scale-pr-'||i||'-'||j, 'scale-repo-'||i||'-2', '2026-09-14',
   CASE WHEN j=1 THEN timestamp '2026-09-13'
@@ -172,4 +240,4 @@ def check(node):
 check(plan['Plan'])
 print(f"PASS: synthetic scale plan, execution {plan['Execution Time']} ms")
 PYTEST
-printf '%s\n' 'PASS: PostgreSQL 17 projections, privileges, cash safeguards, unknown activation, collision refusal and scaled UTC funnel'
+printf '%s\n' 'PASS: PostgreSQL 17 fresh and upgraded first-index projection, repeat update, retained grants and deny checks, cash safeguards, unknown activation, collision refusal and scaled UTC funnel'
