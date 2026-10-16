@@ -11,6 +11,7 @@ mock.module("@/lib/review-attempt-outcome", () => ({
     assessment() {}
     mainPosted = () => {};
     inlinePosted() {}
+    superseded() {}
     async finish() {}
     async publish<T>(operation: () => Promise<T>) { return operation(); }
   },
