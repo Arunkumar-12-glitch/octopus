@@ -122,6 +122,7 @@ export class ReviewOutcomeRecorder {
     this.publication ??= { kind: reviewKind(this.coverage, this.large), archiveId: this.archiveId };
   };
   inlinePosted() { this.inline = true; }
+  superseded() { if (this.main !== "published") this.main = "superseded"; }
   async publish<T>(operation: () => Promise<T>): Promise<T> {
     try {
       const result = await operation();

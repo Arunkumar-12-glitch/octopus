@@ -178,7 +178,9 @@ export async function handleLargeReviewResult(
   const stillCurrent = async () => {
     if (!correlated || !isReviewRequestVersion(coverage.reviewRequestVersion)) return false;
     const latest = await prisma.pullRequest.findUnique({ where: { id: pr.id }, select: { headSha: true, reviewRequestVersion: true, reviewBody: true } });
-    return latest?.headSha === coverage.headSha && latest.reviewRequestVersion === coverage.reviewRequestVersion && latest.reviewBody === reviewBody;
+    const current = latest?.headSha === coverage.headSha && latest.reviewRequestVersion === coverage.reviewRequestVersion && latest.reviewBody === reviewBody;
+    if (!current) outcomeRecord.superseded();
+    return current;
   };
   if (!await stillCurrent()) return;
 

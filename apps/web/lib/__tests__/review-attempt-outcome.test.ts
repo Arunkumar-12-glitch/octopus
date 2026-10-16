@@ -10,7 +10,8 @@ const scenarios = [
   "retention", "recording-failure", "savepoint", "bounded-lock", "timezone-utc", "timezone-berlin", "migration",
   "main-github", "main-gitlab", "main-bitbucket", "main-forgejo", "main-rejected", "main-unknown", "main-stale", "ack-before-db-failure",
   "admission", "admission-failure", "admission-slow", "admission-transaction", "admission-rollback", "admission-source",
-  "callback-throws", "callback-rejects", "claim", "large-source", "rejection-classification",
+  "callback-throws", "callback-rejects", "claim", "rejection-classification",
+  "large-stale-before-delivery", "large-stale-in-delivery", "large-stale-after-publication", "large-current",
 ] as const;
 
 (process.env.RUN_REVIEW_OUTCOME_DB_TESTS === "1" ? describe : describe.skip)("review attempt outcomes with PostgreSQL", () => {

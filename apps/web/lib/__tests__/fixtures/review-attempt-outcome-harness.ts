@@ -339,17 +339,58 @@ try {
         await until(async () => (await read()).outcome === "superseded");
       }
     }
-  } else if (scenario === "claim" || scenario === "large-source") {
-    const source = await readFile(new URL(scenario === "claim" ? "../../reviewer.ts" : "../../large-review-result.ts", import.meta.url), "utf8");
+  } else if (scenario === "claim") {
+    const source = await readFile(new URL("../../reviewer.ts", import.meta.url), "utf8");
     assert.match(source, /await startReviewOutcome\(outcomeKey, new Date\(\)/);
-    if (scenario === "claim") {
-      assert.match(source, /if \(claimed.count\) await startReviewOutcome/); assert.match(source, /if \(outcomeDeferred\) await deferReviewOutcome/);
-      await prisma.reviewAttemptOutcome.deleteMany({ where: { pullRequestId: pr.id } });
-      const results = await Promise.all([productionClaim(), productionClaim()]);
-      assert.equal(results.reduce((n: number, r: { count: number }) => n + r.count, 0), 1);
-      assert.equal((await read()).tries, 1);
-    }
-    else { assert.match(source, /new ReviewOutcomeRecorder\(outcomeKey, true\)/); assert.match(source, /onPosted: !data.error && recordOutcome \? outcomeRecord.mainPosted/); }
+    assert.match(source, /if \(claimed.count\) await startReviewOutcome/); assert.match(source, /if \(outcomeDeferred\) await deferReviewOutcome/);
+    await prisma.reviewAttemptOutcome.deleteMany({ where: { pullRequestId: pr.id } });
+    const results = await Promise.all([productionClaim(), productionClaim()]);
+    assert.equal(results.reduce((n: number, r: { count: number }) => n + r.count, 0), 1);
+    assert.equal((await read()).tries, 1);
+  } else if (scenario.startsWith("large-stale-") || scenario === "large-current") {
+    await prisma.repository.update({ where: { id: repo.id }, data: { installationId: 1 } });
+    let posts = 0;
+    let deliveries = 0;
+    const replaceRequest = async () => {
+      await prisma.pullRequest.update({ where: { id: pr.id }, data: { reviewRequestVersion: 2 } });
+      await supersede(pr.id, 2, late);
+    };
+    mock.module("@/lib/review-attempt", () => ({
+      hasReviewAttempt: async () => {},
+      saveReviewAttempt: async (_id: string, _pr: string, _coverage: unknown, body: string) => {
+        await prisma.pullRequest.update({ where: { id: pr.id }, data: { reviewBody: body } });
+        if (scenario === "large-stale-before-delivery") await replaceRequest();
+      },
+      updateCurrentReview: async () => ({ count: 1 }),
+      recordFirstReviewCompletion: async () => {},
+    }));
+    mock.module("@/lib/review-attempt-delivery", () => ({
+      deliverReviewAttempt: async (_id: string, run: (progress: object, checkpoint: () => Promise<void>) => Promise<void>) => {
+        deliveries++;
+        if (scenario === "large-stale-in-delivery") await replaceRequest();
+        await run({ mainCommentId: null, summaryPublished: false }, async () => {});
+      },
+    }));
+    mock.module("@/lib/review-summary-comment", () => ({
+      publishReviewSummary: async (target: { onPosted?: () => void }) => {
+        posts++;
+        target.onPosted?.();
+        if (scenario === "large-stale-after-publication") await replaceRequest();
+        return 123;
+      },
+    }));
+    mock.module("@/lib/github", () => ({ createPullRequestReview: async () => 1, updateCheckRun: async () => {} }));
+    mock.module("@/lib/pubby", () => ({ pubby: { trigger: async () => {} } }));
+    mock.module("@/lib/events", () => ({ eventBus: { emit: () => {} } }));
+    const { handleLargeReviewResult } = await import("../../large-review-result");
+    await handleLargeReviewResult({ pullRequestId: pr.id, attemptId: archive, reviewRequestVersion: 1,
+      headSha: pr.headSha, baseSha: "b".repeat(40), reviewBody: "Synthetic large review" });
+    const published = scenario === "large-current" || scenario === "large-stale-after-publication";
+    const row = await read();
+    assert.equal(row.outcome, published ? "published" : "superseded");
+    assert.equal(row.publishedAt !== null, published);
+    assert.equal(posts, published ? 1 : 0);
+    assert.equal(deliveries, scenario === "large-stale-before-delivery" ? 0 : 1);
   } else if (scenario === "rejection-classification") {
     for (const prefix of ["PR comment", "GitLab MR note", "Bitbucket PR comment"]) {
       assert.equal(mainCommentFailure(new Error(`Failed to create ${prefix}: 403`)), "failed");
