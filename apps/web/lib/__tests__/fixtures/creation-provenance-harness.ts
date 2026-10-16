@@ -93,6 +93,28 @@ try {
       assert.equal(cols.length, 4);
       assert.ok(cols.every(c => c.column_default === null && c.is_nullable === "YES"));
     });
+  } else if (scenario === "lookup-indexes") {
+    const people = Array.from({ length: 20_000 }, (_, i) => ({ id: `${fixture}-${i}`, email: `${fixture}-${i}@example.com`, name: "Fixture" }));
+    await prisma.user.createMany({ data: people });
+    const org = await prisma.organization.create({ data: { name: "Fixture", slug: fixture } });
+    await prisma.organizationMember.createMany({ data: people.map(p => ({ userId: p.id, organizationId: org.id })) });
+    await prisma.organizationInvitation.createMany({ data: people.map(p => ({ email: p.email, organizationId: org.id,
+      invitedById: people[0].id, expiresAt: new Date("2099-01-01") })) });
+    await prisma.$executeRawUnsafe("ANALYZE organization_members");
+    await prisma.$executeRawUnsafe("ANALYZE organization_invitations");
+    type Plan = { "Index Name"?: string; Plans?: Plan[] };
+    const usesIndex = (plan: Plan, name: string): boolean => plan["Index Name"] === name || (plan.Plans ?? []).some(child => usesIndex(child, name));
+    // Test both a matching row and a new signup with no match: LIMIT 1 alone
+    // does not stop a table scan when the requested user/email is absent.
+    for (const person of [people[10_000], { id: "missing", email: "missing@example.com" }]) {
+      const membership = await prisma.$queryRaw<Array<{ "QUERY PLAN": Array<{ Plan: Plan }> }>>`
+        EXPLAIN (ANALYZE, FORMAT JSON) SELECT id FROM organization_members WHERE "userId" = ${person.id} LIMIT 1`;
+      const invitation = await prisma.$queryRaw<Array<{ "QUERY PLAN": Array<{ Plan: Plan }> }>>`
+        EXPLAIN (ANALYZE, FORMAT JSON) SELECT token FROM organization_invitations
+        WHERE email = ${person.email} AND status = 'pending' AND "expiresAt" > ${new Date()} LIMIT 1`;
+      assert.ok(usesIndex(membership[0]["QUERY PLAN"][0].Plan, "organization_members_userId_idx"), "Membership lookup must use its user index");
+      assert.ok(usesIndex(invitation[0]["QUERY PLAN"][0].Plan, "organization_invitations_email_status_expiresAt_idx"), "Invitation lookup must use its email/status/expiry index");
+    }
   } else if (scenario.startsWith("community-")) {
     const action = scenario.startsWith("community-action");
     const file = await parse(action ? "apps/web/app/api/github-action/review/route.ts" : "apps/web/app/api/oss-review/route.ts");

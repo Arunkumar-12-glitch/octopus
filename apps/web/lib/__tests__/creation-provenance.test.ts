@@ -7,7 +7,7 @@ const cases = [
   "community-action-new", "community-oss-new", "community-action-existing", "community-oss-existing",
   "demo-seed", "github", "google", "microsoft", "oauth-callbacks", "magic-link", "password", "bootstrap",
   "link-later", "invite-pending", "invite-none", "invite-expired", "invite-accepted", "invite-revoked",
-  "invitation-unavailable", "method-unknown", "method-unavailable", "membership-unavailable", "migration",
+  "invitation-unavailable", "method-unknown", "method-unavailable", "membership-unavailable", "migration", "lookup-indexes",
 ] as const;
 
 (enabled ? describe : describe.skip)("creation provenance with PostgreSQL", () => {

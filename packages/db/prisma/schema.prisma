@@ -284,6 +284,7 @@ model OrganizationMember {
   emailNotificationPreferences EmailNotificationPreference[]
 
   @@unique([organizationId, userId])
+  @@index([userId])
   @@map("organization_members")
 }
 
@@ -305,6 +306,7 @@ model OrganizationInvitation {
 
   @@index([organizationId, status])
   @@index([token])
+  @@index([email, status, expiresAt])
   @@map("organization_invitations")
 }
 
