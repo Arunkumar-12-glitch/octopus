@@ -15,6 +15,9 @@ model User {
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
+  arrivalSource String? // signup | invite | system; set only at creation.
+  signupMethod String? // github | magic_link | google | microsoft | password; set only at creation.
+
   onboardingCompleted Boolean @default(false)
   onboardingStep      Int     @default(0)
 
@@ -112,6 +115,8 @@ model Verification {
 }
 
 model Organization {
+  creationSource String? // auto_default | user_created | community_bot | demo_seed; set only at creation.
+  creatorFirstOrganization Boolean? // All memberships, including removed ones; user-created paths only.
   id                   String   @id @default(cuid())
   name                 String
   slug                 String   @unique
@@ -279,6 +284,7 @@ model OrganizationMember {
   emailNotificationPreferences EmailNotificationPreference[]
 
   @@unique([organizationId, userId])
+  @@index([userId])
   @@map("organization_members")
 }
 
@@ -300,6 +306,7 @@ model OrganizationInvitation {
 
   @@index([organizationId, status])
   @@index([token])
+  @@index([email, status, expiresAt])
   @@map("organization_invitations")
 }
 
