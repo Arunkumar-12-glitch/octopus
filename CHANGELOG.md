@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-10-17
+
+### Fixed
+
+- Keep the auto-reload switch aligned with saved billing settings after a refresh, while preserving unsaved drafts during card setup.
+- Show saved auto-reload status and unsaved changes clearly. Prevent editing the switch or amounts while settings are being saved.
+
+### Upgrade notes
+
+- No database migrations or billing configuration changes. Update web and review workers; existing auto-reload preferences remain unchanged.
+
 ## [1.3.0] - 2026-10-16
 
 ### Added
