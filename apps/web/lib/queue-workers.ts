@@ -82,10 +82,10 @@ export async function registerWorkers(boss: PgBoss, config: QueueConfig): Promis
       for (const job of jobs) {
         console.log(`[queue] Processing review for PR ${job.data.pullRequestId}`);
         try {
-          await processReview(job.data.pullRequestId, createReviewExecutionWindow(job));
+          await processReview(job.data.pullRequestId, createReviewExecutionWindow(job), job.retryCount);
         } catch (err) {
           reportBackgroundFailure(err, { stage: "review", pullRequestId: job.data.pullRequestId,
-            attemptId: job.id, retry: { retryCount: job.retryCount, retryLimit: job.retryLimit } });
+            attemptId: job.id, signal: job.signal, retry: { retryCount: job.retryCount, retryLimit: job.retryLimit } });
           console.error(`[queue] Review failed for PR ${job.data.pullRequestId} (job ${job.id}):`, err);
           throw err;
         }

@@ -57,7 +57,7 @@ RUN --mount=type=secret,id=sentry_auth_token \
     export SENTRY_AUTH_TOKEN="$(cat /run/secrets/sentry_auth_token 2>/dev/null || true)" && \
     cd apps/web && bun run build
 RUN cd apps/web && bun build scripts/rc-acceptance.ts --target=node --outfile=/app/rc-acceptance.mjs
-RUN cd apps/web && bun build scripts/sentry-smoke.ts --target=node --external @sentry/nextjs --outfile=/app/sentry-smoke.mjs
+RUN cd apps/web && bun run scripts/build-sentry-smoke.ts /app/sentry-smoke.mjs
 
 # --- runner ---
 FROM node:22-alpine AS runner

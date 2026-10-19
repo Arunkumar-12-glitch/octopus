@@ -1,4 +1,5 @@
 import "server-only";
+import { AiProviderFailure, type KeyOwner } from "../provider-failure";
 import { observeAiRequest, completionEvidence } from "./request-evidence";
 import Anthropic from "@anthropic-ai/sdk";
 import { spawn } from "node:child_process";
@@ -41,13 +42,15 @@ const CLI_TIMEOUT_MS = Number(process.env.OCTOPUS_CLAUDE_CODE_TIMEOUT_MS ?? 5 * 
 async function loadOrgConfig(orgId?: string | null): Promise<{
   mode: AuthMode;
   apiKey: string | null;
+  keyOwner: KeyOwner;
 } | null> {
   // Env fallback for self-hosters who want a single global config:
   //   OCTOPUS_CLAUDE_CODE_MODE = "subscription" | "api-key"
   //   ANTHROPIC_API_KEY        (re-used when mode is api-key)
   const envMode = process.env.OCTOPUS_CLAUDE_CODE_MODE as AuthMode | undefined;
   if (envMode === "subscription" || envMode === "api-key") {
-    return { mode: envMode, apiKey: process.env.ANTHROPIC_API_KEY ?? null };
+    return { mode: envMode, apiKey: process.env.ANTHROPIC_API_KEY ?? null,
+      keyOwner: envMode === "api-key" && process.env.ANTHROPIC_API_KEY ? "platform" : "unknown" };
   }
 
   if (!orgId) return null;
@@ -63,7 +66,7 @@ async function loadOrgConfig(orgId?: string | null): Promise<{
   // path above uses process.env values (plaintext) and is NOT decrypted.
   const rawKey = mode === "api-key" ? org.claudeCodeApiKey ?? org.anthropicApiKey ?? null : null;
   const apiKey = rawKey ? decryptStringMaybeLegacy(rawKey) : null;
-  return { mode, apiKey };
+  return { mode, apiKey, keyOwner: mode === "api-key" && apiKey ? "organization" : "unknown" };
 }
 
 // One client per distinct API key. The previous single-slot cache
@@ -101,10 +104,14 @@ export const claudeCodeProvider: Provider = {
       );
     }
 
-    if (config.mode === "subscription") {
-      return await runClaudeCli(params);
+    try {
+      if (config.mode === "subscription") {
+        return await runClaudeCli(params);
+      }
+      return await runAnthropicApi(params, config.apiKey);
+    } catch (error) {
+      throw new AiProviderFailure(error, "claude-code", params.model, config.keyOwner);
     }
-    return await runAnthropicApi(params, config.apiKey);
   },
 };
 

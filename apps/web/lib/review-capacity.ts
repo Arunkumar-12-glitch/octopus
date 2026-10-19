@@ -1,5 +1,6 @@
 import { sha256, prepareReviewInput, type ReviewCoverage, type ReviewInput } from "./review-coverage";
 import { DIFF_CHAR_CAP, MAX_FETCH_DIFF_CHARS } from "./diff-truncate";
+import { safeErrorDetails, type KeyOwner } from "./provider-failure";
 
 /** Product admission limits, not a claim about a particular review's fit or invoice. */
 export const COMPLETE_REVIEW_POLICY = Object.freeze({
@@ -135,17 +136,21 @@ export function capacityReceipt(admission: CompleteReviewAdmission, model: strin
 }
 
 export class CapacityAdmissionError extends Error {
-  constructor(public readonly receipt: CapacityAdmissionReceipt) {
+  readonly details: ReturnType<typeof safeErrorDetails>;
+  keyOwner: KeyOwner = "unknown";
+  constructor(public readonly receipt: CapacityAdmissionReceipt, error?: unknown) {
     super(`Complete review admission refused: ${receipt.reason ?? "final-check-failed"}`);
     this.name = "CapacityAdmissionError";
+    this.details = safeErrorDetails(error);
   }
 }
 
-export function refuseCapacity(admission: CompleteReviewAdmission, receipt: CapacityAdmissionReceipt, reason: CapacityRefusalReason): never {
+export function refuseCapacity(admission: CompleteReviewAdmission, receipt: CapacityAdmissionReceipt, reason: CapacityRefusalReason, error?: unknown): never {
+  if (error instanceof CapacityAdmissionError) throw error;
   receipt.state = "rejected";
   receipt.reason = reason;
   admission.onDecision?.(structuredClone(receipt));
-  throw new CapacityAdmissionError(receipt);
+  throw new CapacityAdmissionError(receipt, error);
 }
 
 /** No supplied hunk can be claimed after a proven refusal before generation. Keep acquired patch identities. */

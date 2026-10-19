@@ -2,7 +2,7 @@ import "./review-outcome-stub";
 import { mock } from "bun:test";
 import assert from "node:assert/strict";
 import type { AiCreateParams } from "@/lib/providers";
-import { assertReviewProcessingActive, type ReviewExecutionWindow } from "@/lib/review-capacity";
+import { assertReviewProcessingActive, type ReviewExecutionWindow, type CapacityRefusalReason } from "@/lib/review-capacity";
 import type { ReviewCoverage } from "@/lib/review-coverage";
 mock.module("server-only", () => ({}));
 const sentryEvents: Array<{ tags?: Record<string, unknown>; contexts?: Record<string, Record<string, unknown>> }> = [];
@@ -27,7 +27,9 @@ let received: { messages: { role: string; content: string }[] };
 let malformed = false;
 let responseOverride: string | null = null;
 let providerInterrupted = false;
-let adaptiveStage: "before-validator" | "during-validator" | "expired-validator" | "after-save" | "summary-send" | "check-send" | "summary-timeout" | "gitlab-auth" | "transport-control" | "gitlab-transport-control" | null = null;
+let capacityReason: CapacityRefusalReason = "metadata-unavailable";
+let capacityAbort: "cancel" | "timeout" | null = null;
+let adaptiveStage: "admission" | "generation-cancel" | "generation-timeout" | "before-validator" | "during-validator" | "expired-validator" | "after-save" | "summary-send" | "check-send" | "summary-timeout" | "gitlab-auth" | "transport-control" | "gitlab-transport-control" | null = null;
 let adaptiveAbort = new AbortController();
 let adaptiveRemaining = 900000;
 let validatorCalls = 0;
@@ -137,11 +139,19 @@ mock.module("@/lib/ai-router", () => ({ getProviderForModel: async () => {
   if (adaptiveStage) {
     assert.ok(params.completeReviewAdmission, "Oversized complete input must use capacity admission");
     const { observeAiRequest } = await import("@/lib/providers/request-evidence");
-    const { capacityReceipt } = await import("@/lib/review-capacity");
+    const { capacityReceipt, refuseCapacity } = await import("@/lib/review-capacity");
     const receipt = capacityReceipt(params.completeReviewAdmission, params.model);
+    if (adaptiveStage === "admission") {
+      if (capacityAbort) adaptiveAbort.abort(new DOMException("fixture", capacityAbort === "timeout" ? "TimeoutError" : "AbortError"));
+      refuseCapacity(params.completeReviewAdmission, receipt, capacityReason);
+    }
     receipt.state = "admitted"; receipt.primaryDispatch = "started";
     params.completeReviewAdmission.onDecision?.(receipt);
     observeAiRequest(params, "anthropic", { model: params.model, messages: params.messages });
+    if (adaptiveStage === "generation-cancel" || adaptiveStage === "generation-timeout") {
+      adaptiveAbort.abort(new DOMException("fixture", adaptiveStage === "generation-timeout" ? "TimeoutError" : "AbortError"));
+      throw new Error("Provider interrupted");
+    }
     return { model: params.model, provider: "anthropic", completion: { state: "completed", reason: "end_turn" },
       text: report, usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } };
   }
@@ -370,7 +380,14 @@ if (preserveAutoReview) {
     events.length = 0;
     const errors = console.error;
     console.error = () => {};
-    try { await processReview("pr"); } finally { console.error = errors; }
+    const beforeIncidents = sentryEvents.length;
+    try { await processReview("pr", undefined, 2); } finally { console.error = errors; }
+    assert.equal(sentryEvents.length - beforeIncidents, mode === "fail" ? 1 : 0);
+    if (mode === "fail") {
+      assert.equal(sentryEvents.at(-1)?.contexts?.background_failure?.attemptId, repo.indexAttemptId);
+      assert.equal(sentryEvents.at(-1)?.contexts?.background_failure?.retryCount, 2);
+      assert.equal(sentryEvents.at(-1)?.tags?.failure_stage, "indexing");
+    }
     assert.equal(repo.indexStatus, mode === "fail" ? "failed" : "indexing");
     assert.equal(indexingCalls, mode === "replace-success" ? 2 : 1, "Only successful setup reaches the indexer");
     assert.deepEqual(repo.firstIndexedAt, firstIndex);
@@ -484,13 +501,19 @@ const beforeSentryFailure = sentryEvents.length;
 const errorLog = console.error;
 console.error = () => {};
 try {
-  await processReview("pr");
+  await processReview("pr", undefined, 1);
+  assert.equal(sentryEvents.at(-1)?.contexts?.background_failure?.retryCount, 1);
   assert.equal((archived.at(-1)!.coverage as ReviewCoverage).complete, true);
   assert.equal((archived.at(-1)!.coverage as ReviewCoverage).assessment?.state, "incomplete");
   assert.equal((archived.at(-1)!.coverage as ReviewCoverage).assessment?.reason, "Provider request failed or was interrupted");
   assert.equal(sentryEvents.length, beforeSentryFailure + 1, "caught provider failure must reach Sentry exactly once");
   assert.equal(sentryEvents.at(-1)?.tags?.failure_stage, "generation");
   assert.equal(sentryEvents.at(-1)?.contexts?.background_failure?.pullRequestId, "pr");
+  const cancelled = new AbortController(); cancelled.abort();
+  const before = sentryEvents.length;
+  await processReview("pr", { jobId: "cancelled-ordinary", deadlineEpochMs: Date.now() + 900000,
+    signal: cancelled.signal, remainingMs: () => 900000 });
+  assert.equal(sentryEvents.length, before);
 } finally { providerInterrupted = false; console.error = errorLog; }
 // Lookup outages retain full assessment and keep the provider-output gate.
 lookupFailure = true;
@@ -529,14 +552,30 @@ assert.ok(summaries.at(-1)?.includes("Review coverage"));
 
 // The real hosted post-primary pipeline must not publish a scored completion after cancellation.
 nativeFailure = false;
-for (const stage of ["before-validator", "during-validator", "expired-validator", "after-save"] as const) {
+for (const reason of ["metadata-unavailable", "count-unavailable", "pricing-unavailable", "final-check-failed", "context-limit", "billing-blocked", "stale-review"] as const) {
+  for (const abort of [null, "cancel", "timeout"] as const) {
+    capacityReason = reason; capacityAbort = abort; adaptiveStage = "admission";
+    adaptiveAbort = new AbortController(); adaptiveRemaining = 900000;
+    const before = sentryEvents.length;
+    const errors = console.error; console.error = () => {};
+    try { await processReview("pr", { jobId: "admission", deadlineEpochMs: Date.now() + 900000,
+      signal: adaptiveAbort.signal, remainingMs: () => adaptiveRemaining }); } finally { console.error = errors; }
+    const actionable = reason.endsWith("unavailable") || reason === "final-check-failed";
+    assert.equal(sentryEvents.length - before, actionable && abort !== "cancel" ? 1 : 0, `${reason}/${abort}`);
+    if (actionable && abort !== "cancel") assert.equal(sentryEvents.at(-1)?.tags?.failure_code, `capacity_${reason}`);
+  }
+}
+capacityAbort = null;
+for (const stage of ["generation-cancel", "generation-timeout", "before-validator", "during-validator", "expired-validator", "after-save"] as const) {
   adaptiveStage = stage; adaptiveAbort = new AbortController(); adaptiveRemaining = 900000;
   const before = archived.length, validations = validatorCalls, checks = checkConclusions.length;
+  const beforeIncidents = sentryEvents.length;
   const errors = console.error; console.error = () => {};
   try {
     await processReview("pr", { jobId: "synthetic-adaptive", deadlineEpochMs: Date.now() + 900000,
       signal: adaptiveAbort.signal, remainingMs: () => adaptiveRemaining });
   } finally { console.error = errors; }
+  assert.equal(sentryEvents.length - beforeIncidents, ["expired-validator", "generation-timeout"].includes(stage) ? 1 : 0, stage);
   const failed = archived.at(-1)!;
   const coverage = failed.coverage as ReviewCoverage;
   assert.equal(coverage.assessment?.state, "incomplete", stage);
@@ -548,7 +587,7 @@ for (const stage of ["before-validator", "during-validator", "expired-validator"
   assert.ok(summaries.at(-1)!.startsWith(`Review attempt: ${failed.id}. Head:`), stage);
   assert.ok(summaries.at(-1)!.includes(`/api/review-attempts/${failed.id}`), stage);
   assert.ok(!checkConclusions.slice(checks).includes("success"), stage);
-  if (stage === "before-validator") assert.equal(validatorCalls, validations);
+  if (stage === "before-validator" || stage.startsWith("generation-")) assert.equal(validatorCalls, validations);
   else assert.equal(validatorCalls, validations + 1);
   if (stage === "after-save") {
     assert.equal(archived.length, before + 2);
@@ -563,11 +602,13 @@ for (const stage of ["summary-send", "summary-timeout", "check-send", "gitlab-au
   adaptiveStage = stage; adaptiveAbort = new AbortController(); adaptiveRemaining = 900000;
   repo.provider = stage.startsWith("gitlab") ? "gitlab" : "github";
   const before = archived.length, priorUsage = usageCount, beforeEvents = events.length;
+  const beforeIncidents = sentryEvents.length;
   const errors = console.error; console.error = () => {};
   try {
     await processReview("pr", { jobId: "synthetic-adaptive", deadlineEpochMs: Date.now() + 900000,
       signal: adaptiveAbort.signal, remainingMs: () => adaptiveRemaining });
   } finally { console.error = errors; }
+  if (!stage.endsWith("control")) assert.equal(sentryEvents.length - beforeIncidents, stage === "summary-timeout" ? 1 : 0, stage);
   assert.equal(usageCount, priorUsage + 1, stage);
   assert.equal(JSON.stringify(archived[before]), completedSnapshot, stage);
   assert.equal((archived[before].coverage as ReviewCoverage).assessment?.state, "completed", stage);

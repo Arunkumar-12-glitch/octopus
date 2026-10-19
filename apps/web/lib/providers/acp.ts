@@ -1,4 +1,5 @@
 import "server-only";
+import { AiProviderFailure, type KeyOwner } from "../provider-failure";
 import { prisma } from "@octopus/db";
 import { decryptStringMaybeLegacy } from "@/lib/crypto";
 import type { Provider, AiCreateParams, AiResponse } from "./index";
@@ -19,7 +20,7 @@ import { validateProviderUrl } from "./url-validation";
  * controlled and may legitimately point at an internal host, so it is only
  * normalized to an origin (private ranges allowed).
  */
-async function resolveConfig(orgId?: string | null): Promise<{ baseUrl: string; apiKey: string } | null> {
+async function resolveConfig(orgId?: string | null): Promise<{ baseUrl: string; apiKey: string; keyOwner: KeyOwner } | null> {
   // Per-org config overrides the deployment env default.
   if (orgId) {
     const org = await prisma.organization.findUnique({
@@ -27,12 +28,12 @@ async function resolveConfig(orgId?: string | null): Promise<{ baseUrl: string; 
       select: { acpBaseUrl: true, acpApiKey: true },
     });
     if (org?.acpBaseUrl && org?.acpApiKey) {
-      return { baseUrl: validateProviderUrl(org.acpBaseUrl), apiKey: decryptStringMaybeLegacy(org.acpApiKey) };
+      return { baseUrl: validateProviderUrl(org.acpBaseUrl), apiKey: decryptStringMaybeLegacy(org.acpApiKey), keyOwner: "organization" };
     }
   }
   const envBase = process.env.ACP_BASE_URL;
   const envKey = process.env.ACP_API_KEY;
-  if (envBase && envKey) return { baseUrl: validateProviderUrl(envBase, { hosted: false }), apiKey: envKey };
+  if (envBase && envKey) return { baseUrl: validateProviderUrl(envBase, { hosted: false }), apiKey: envKey, keyOwner: "platform" };
   return null;
 }
 
@@ -51,11 +52,15 @@ export const acpProvider: Provider = {
           "configure acpBaseUrl and acpApiKey on the organization.",
       );
     }
-    return callOpenAiGateway(params, {
-      name: "acp",
-      modelPrefix: "acp:",
-      baseUrl: config.baseUrl,
-      apiKey: config.apiKey,
-    });
+    try {
+      return await callOpenAiGateway(params, {
+        name: "acp",
+        modelPrefix: "acp:",
+        baseUrl: config.baseUrl,
+        apiKey: config.apiKey,
+      });
+    } catch (error) {
+      throw new AiProviderFailure(error, "acp", params.model, config.keyOwner);
+    }
   },
 };

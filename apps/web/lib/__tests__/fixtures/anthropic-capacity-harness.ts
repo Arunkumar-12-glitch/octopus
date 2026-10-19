@@ -4,6 +4,10 @@ import type { AiCreateParams } from "../../providers";
 import type { CapacityRefusalReason } from "../../review-capacity";
 
 mock.module("server-only", () => ({}));
+const sentryEvents: Array<{ tags?: Record<string, unknown>; contexts?: Record<string, Record<string, unknown>> }> = [];
+mock.module("@sentry/nextjs", () => ({ captureEvent: (event: typeof sentryEvents[number]) => { sentryEvents.push(event); return "e".repeat(32); } }));
+const { reportBackgroundFailure } = await import("../../background-failure");
+let providerStatus: number | undefined;
 // Every external boundary is synthetic. Any unexpected HTTP access fails immediately.
 globalThis.fetch = (() => { throw new Error("Unexpected network access in capacity harness"); }) as typeof fetch;
 let provider = "anthropic";
@@ -49,7 +53,7 @@ class FakeAnthropic {
   baseURL = endpoint;
   models = { retrieve: async (model: string, _: unknown, options: Record<string, unknown>) => {
     calls.push({ operation: "metadata", body: model, options, client: this });
-    if (mode === "metadata-failure") throw new Error("private provider error must not appear in evidence");
+    if (mode === "metadata-failure") throw Object.assign(new Error("private provider error must not appear in evidence"), { status: providerStatus });
     if (mode === "metadata-cancel") controller.abort();
     if (mode === "metadata-slow") remaining = 659_999;
     return structuredClone(metadata);
@@ -57,7 +61,7 @@ class FakeAnthropic {
   messages = {
     countTokens: async (body: unknown, options: Record<string, unknown>) => {
       calls.push({ operation: "count", body: structuredClone(body), options, client: this });
-      if (mode === "count-failure") throw new Error("private count error");
+      if (mode === "count-failure") throw Object.assign(new Error("private count error"), { status: providerStatus });
       if (mode === "count-cancel") controller.abort();
       if (mode === "count-slow") remaining = 659_999;
       return { input_tokens: count, _request_id: "req_synthetic_count" };
@@ -127,6 +131,16 @@ async function refusal(reason: CapacityRefusalReason, edit?: (params: AiCreatePa
   try { await executeCoveredReview(params, p.coverage, "template", req => createAiMessage(req, "synthetic")); } catch (error) { caught = error; }
   assert.ok(caught instanceof CapacityAdmissionError, String(caught));
   assert.equal(caught.receipt.reason, reason);
+  const incidentCount = sentryEvents.length;
+  reportBackgroundFailure(caught, { stage: "generation", signal: controller.signal });
+  const actionable = ["metadata-unavailable", "count-unavailable", "invalid-count", "pricing-unavailable", "final-check-failed", "execution-window"].includes(reason);
+  const expected = controller.signal.aborted || (!!org.anthropicApiKey && [401, 402, 403, 429].includes(providerStatus ?? 0));
+  assert.equal(sentryEvents.length - incidentCount, actionable && !expected ? 1 : 0, reason);
+  if (actionable && !expected) {
+    assert.equal(sentryEvents.at(-1)?.tags?.failure_code, `capacity_${reason}`);
+    assert.equal(sentryEvents.at(-1)?.tags?.failure_stage, "preparation");
+    assert.ok(!JSON.stringify(sentryEvents.at(-1)).includes("private"));
+  }
   assert.equal(caught.receipt.primaryDispatch, "not-started");
   assert.equal(calls.filter(call => call.operation === "generation").length, 0);
   assert.equal(p.coverage.complete, false);
@@ -191,6 +205,15 @@ for (const [scenario, reason] of [
   ["metadata-cancel", "execution-window"], ["count-cancel", "execution-window"],
   ["metadata-slow", "execution-window"], ["count-slow", "execution-window"],
 ] as const) { reset(); mode = scenario; await refusal(reason); }
+for (const operation of ["metadata", "count"]) {
+  for (const key of ["", "synthetic-byok"]) {
+    for (const status of [401, 402, 403, 429, 503]) {
+      reset(); mode = `${operation}-failure`; org.anthropicApiKey = key; providerStatus = status;
+      await refusal(operation === "metadata" ? "metadata-unavailable" : "count-unavailable");
+    }
+  }
+}
+providerStatus = undefined; org.anthropicApiKey = "synthetic-byok";
 reset(); endpoint = "https://gateway.invalid"; await refusal("unsupported-route"); assert.equal(calls.length, 0);
 for (const edit of [
   () => { metadata.id = "canonical-alias"; },

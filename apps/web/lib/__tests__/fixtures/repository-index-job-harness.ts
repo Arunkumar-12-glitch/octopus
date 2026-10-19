@@ -2,7 +2,7 @@ import { mock } from "bun:test";
 import assert from "node:assert/strict";
 
 mock.module("server-only", () => ({}));
-const sentryEvents: Array<{ tags?: Record<string, unknown> }> = [];
+const sentryEvents: Array<{ tags?: Record<string, unknown>; contexts?: Record<string, Record<string, unknown>> }> = [];
 mock.module("@sentry/nextjs", () => ({ captureEvent: (event: typeof sentryEvents[number]) => { sentryEvents.push(event); return "e".repeat(32); } }));
 const row = {
   id: "repo-1", provider: "github", organizationId: "org-1", fullName: "acme/new", defaultBranch: "main",
@@ -82,7 +82,7 @@ mock.module("@/lib/indexer", () => ({
   indexRepository: async (...args: unknown[]) => {
     indexCalls.push(args);
     if (cancelled) { controller.abort(); throw controller.signal.reason; }
-    if (timedOut) { assert.ok(timeoutCallback); timeoutCallback(); throw controller.signal.reason; }
+    if (timedOut) { assert.ok(timeoutCallback); timeoutCallback(); throw new Error("Indexing cancelled"); }
     if (replaceAttempt) {
       Object.assign(currentRow!, { indexStatus: "indexing", indexAttemptId: "replacement" });
       throw new Error("Old worker failed after replacement");
@@ -157,7 +157,14 @@ assert.equal(claims.at(-1)?.data.indexStatus, "pending", "cancelled work must re
 assert.equal(notifications.at(-1), "pending");
 cancelled = false;
 timedOut = true;
-await assert.rejects(() => processRepositoryIndex(job), { name: "TimeoutError" });
+const beforeTimeout = sentryEvents.length;
+await assert.rejects(() => processRepositoryIndex(job, { retryCount: 1, retryLimit: 2 }), { name: "TimeoutError" });
+assert.equal(sentryEvents.length, beforeTimeout);
+await assert.rejects(() => processRepositoryIndex(job, { retryCount: 2, retryLimit: 2 }), { name: "TimeoutError" });
+assert.equal(sentryEvents.length, beforeTimeout + 1);
+assert.equal(sentryEvents.at(-1)?.contexts?.background_failure?.name, "TimeoutError");
+assert.equal(sentryEvents.at(-1)?.contexts?.background_failure?.attemptId, currentRow?.indexAttemptId);
+assert.equal(sentryEvents.at(-1)?.contexts?.background_failure?.retryCount, 2);
 assert.equal(currentRow?.indexStatus, "failed");
 assert.equal(notifications.at(-1), "failed");
 assert.equal(currentRow?.firstIndexedAt, null);

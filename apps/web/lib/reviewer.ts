@@ -58,7 +58,7 @@ import { getGithubAppConfig } from "@/lib/github-app-config";
 import { parseOctopusIgnore, detectBadCommits } from "@/lib/octopus-ignore";
 import { buildGeneratedMatcher } from "@/lib/generated-files";
 import { MAX_DIFF_CHARS } from "@/lib/diff-truncate";
-import { CapacityAdmissionError, completeReviewCandidate, reviewCandidateSha256, assertReviewProcessingActive, ReviewProcessingExpiredError, type CompleteReviewAdmission, type ReviewExecutionWindow } from "@/lib/review-capacity";
+import { completeReviewCandidate, reviewCandidateSha256, assertReviewProcessingActive, ReviewProcessingExpiredError, type CompleteReviewAdmission, type ReviewExecutionWindow } from "@/lib/review-capacity";
 import { confirmCompleteReviewCurrent } from "@/lib/review-capacity-current";
 import { prepareReviewInput, applyReviewCoverage, coverageSummary, reviewCheckResult, reviewAssessmentComplete, type ReviewInput, type ReviewCoverage } from "@/lib/review-coverage";
 import { prepareReviewComment } from "@/lib/review-comment-context";
@@ -631,23 +631,23 @@ async function syncTextDismissalsForPR(
   }
 }
 
-export async function processReview(pullRequestId: string, executionWindow?: ReviewExecutionWindow): Promise<void> {
+export async function processReview(pullRequestId: string, executionWindow?: ReviewExecutionWindow, retryCount = 0): Promise<void> {
   const pr = await prisma.pullRequest.findUnique({
     where: { id: pullRequestId }, select: { headSha: true, reviewRequestVersion: true, repository: { select: { id: true, provider: true } } },
   });
   if (pr?.repository.provider === "forgejo") {
     return forgejo.runWithForgejoRepository(pr.repository.id, () => {
-      if (!forgejo.usesForgejoConnector()) return processReviewInternal(pullRequestId, executionWindow, pr);
+      if (!forgejo.usesForgejoConnector()) return processReviewInternal(pullRequestId, executionWindow, pr, retryCount);
       return withForgejoReviewPublication(
         pullRequestId, pr.headSha, pr.reviewRequestVersion,
-        () => processReviewInternal(pullRequestId, executionWindow, pr), executionWindow?.signal,
+        () => processReviewInternal(pullRequestId, executionWindow, pr, retryCount), executionWindow?.signal,
       );
     }, pr.headSha);
   }
-  return processReviewInternal(pullRequestId, executionWindow);
+  return processReviewInternal(pullRequestId, executionWindow, undefined, retryCount);
 }
 
-async function processReviewInternal(pullRequestId: string, executionWindow?: ReviewExecutionWindow, expected?: { headSha: string | null; reviewRequestVersion: number }): Promise<void> {
+async function processReviewInternal(pullRequestId: string, executionWindow?: ReviewExecutionWindow, expected?: { headSha: string | null; reviewRequestVersion: number }, retryCount = 0): Promise<void> {
   // Load PR with repo and org info
   const pr = await prisma.pullRequest.findUnique({
     where: { id: pullRequestId },
@@ -719,6 +719,7 @@ async function processReviewInternal(pullRequestId: string, executionWindow?: Re
   let adaptiveProcessingWindow: ReviewExecutionWindow | undefined;
   let attemptCoverage: ReviewCoverage | undefined;
   let failureStage: FailureStage = "review";
+  let failureIndexAttemptId: string | undefined;
   let attemptSaved = false;
   const outcomeRecord = new ReviewOutcomeRecorder(outcomeKey);
   let recordReviewMain = false;
@@ -1032,6 +1033,7 @@ async function processReviewInternal(pullRequestId: string, executionWindow?: Re
 
       // ── Run indexing (only if we hold the claim) ──
       if (shouldRunIndexing) {
+        failureIndexAttemptId = indexAttemptId;
         const indexChannel = `presence-org-${org.id}`;
         const emitIndexLog = (message: string, level: LogLevel = "info") => {
           const timestamp = Date.now();
@@ -2585,6 +2587,7 @@ async function processReviewInternal(pullRequestId: string, executionWindow?: Re
 
     console.log(`[reviewer] Review completed for PR #${pr.number}`);
   } catch (err) {
+    const reportingError = err;
     if (adaptiveProcessingWindow
       && (adaptiveProcessingWindow.signal.aborted || adaptiveProcessingWindow.remainingMs() <= 0)) {
       err = new ReviewProcessingExpiredError();
@@ -2655,9 +2658,11 @@ async function processReviewInternal(pullRequestId: string, executionWindow?: Re
     })
       .catch((e) => console.error("[reviewer] Failed to update PR status:", e));
     if (failedUpdate?.count === 0) return;
-    if (!(err instanceof SupersededIndexError) && !(err instanceof CapacityAdmissionError)) {
-      reportBackgroundFailure(err, { stage: failureStage, attemptId: failureAttemptId,
-        repositoryId: repo.id, pullRequestId: pr.id, headSha: pr.headSha, requestVersion: pr.reviewRequestVersion });
+    if (!(err instanceof SupersededIndexError)) {
+      reportBackgroundFailure(reportingError, { stage: failureStage,
+        attemptId: failureStage === "indexing" ? failureIndexAttemptId : failureAttemptId,
+        repositoryId: repo.id, pullRequestId: pr.id, headSha: pr.headSha, requestVersion: pr.reviewRequestVersion,
+        retryCount, signal: executionWindow?.signal });
     }
     if (!failedUpdate?.count) return;
 

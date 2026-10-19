@@ -13,13 +13,37 @@ mock.module("@sentry/nextjs", () => ({ captureEvent: (event: ErrorEvent) => {
   return "e".repeat(32);
 } }));
 let byok = false;
+let adapterOrg: Record<string, string> = {};
+const usedKeys: string[] = [];
+globalThis.fetch = (() => { throw new Error("Unexpected network access"); }) as typeof fetch;
 let failure: unknown = new Error("terminated", { cause: Object.assign(new Error("private body"), { code: "UND_ERR_SOCKET", headers: { authorization: "secret" } }) });
 mock.module("@octopus/db", () => ({ prisma: {
   availableModel: { findMany: async () => [] },
-  organization: { findUnique: async () => ({ anthropicApiKey: byok ? "secret" : null }) },
+  organization: { findUnique: async () => ({ anthropicApiKey: byok ? "secret" : null, ...adapterOrg }) },
 } }));
 mock.module("@/lib/crypto", () => ({ decryptStringMaybeLegacy: (value: string) => value }));
-mock.module("@/lib/providers", () => ({ getProvider: () => ({ create: async () => { if (failure) throw failure; return { text: "complete" }; } }) }));
+mock.module("openai", () => ({ default: class {
+  constructor(options: { apiKey: string }) { usedKeys.push(options.apiKey); }
+  chat = { completions: { create: async () => {
+    if (failure) throw failure;
+    return { choices: [{ finish_reason: "stop", message: { content: "complete" } }] };
+  } } };
+} }));
+mock.module("@anthropic-ai/sdk", () => ({ default: class {
+  static APIUserAbortError = class extends Error {};
+  constructor(options: { apiKey: string }) { usedKeys.push(options.apiKey); }
+  messages = { stream: () => ({ finalMessage: async () => {
+    if (failure) throw failure;
+    return { content: [{ type: "text", text: "complete" }], stop_reason: "end_turn", usage: { input_tokens: 1, output_tokens: 1 } };
+  } }) };
+} }));
+mock.module("node:child_process", () => ({ spawn: () => { throw new Error("CLI unavailable"); } }));
+const { acpProvider } = await import("../../providers/acp");
+const { opencodeProvider } = await import("../../providers/opencode");
+const { claudeCodeProvider } = await import("../../providers/claude-code");
+const adapters = { acp: acpProvider, opencode: opencodeProvider, "claude-code": claudeCodeProvider };
+mock.module("@/lib/providers", () => ({ getProvider: (name: string) => adapters[name as keyof typeof adapters]
+  ?? { create: async () => { if (failure) throw failure; return { text: "complete" }; } } }));
 const { createAiMessage } = await import("../../ai-router");
 const { reportBackgroundFailure } = await import("../../background-failure");
 const { AiProviderFailure, providerKeyOwner, safeErrorDetails } = await import("../../provider-failure");
@@ -49,7 +73,7 @@ for (const status of [401, 402, 403, 429, 503]) {
     if (!byok) assert.equal(events.at(-1)?.tags?.failure_owner, "platform");
   }
 }
-for (const message of ["Out of credits", "Monthly spend limit reached", "Indexing cancelled", "Indexing attempt is no longer current"]) {
+for (const message of ["Out of credits", "Monthly spend limit reached", "Indexing attempt is no longer current"]) {
   const before = events.length;
   reportBackgroundFailure(new Error(message), context);
   assert.equal(events.length, before);
@@ -65,6 +89,59 @@ failure = null;
 assert.equal((await createAiMessage(request, "org")).text, "complete");
 assert.equal(events.length, before + 1, "success does not emit a failure");
 assert.equal(providerKeyOwner("ollama", false), "unknown");
+const cancellation = new AbortController(); cancellation.abort();
+const beforeCancelled = events.length;
+reportBackgroundFailure(new Error("Indexing cancelled"), { ...context, signal: cancellation.signal });
+assert.equal(events.length, beforeCancelled);
+reportBackgroundFailure(new Error("Indexing cancelled"), context);
+assert.equal(events.length, beforeCancelled + 1, "a message alone does not prove cancellation");
+const timeout = new AbortController(); timeout.abort(new DOMException("Deadline", "TimeoutError"));
+reportBackgroundFailure(timeout.signal.reason, { ...context, signal: timeout.signal });
+assert.equal(events.length, beforeCancelled + 2);
+reportBackgroundFailure(new AiProviderFailure(new Error("terminated"), "anthropic", request.model, "platform"), { ...context, synthetic: true });
+assert.equal(events.at(-1)?.tags?.synthetic, "true");
+assert.notDeepEqual(events.at(-1)?.fingerprint, events[0].fingerprint);
+assert.equal(events[0].tags?.synthetic, "false");
+for (const provider of ["acp", "opencode", "claude-code"] as const) {
+  for (const owner of ["organization", "platform"] as const) {
+    byok = false;
+    adapterOrg = owner === "organization" ? {
+      acpBaseUrl: "https://acp.example.test", acpApiKey: "org-secret",
+      opencodeBaseUrl: "https://opencode.example.test", opencodeApiKey: "org-secret",
+      claudeCodeAuthMode: "api-key", claudeCodeApiKey: "org-secret",
+    } : {};
+    process.env.ACP_BASE_URL = "https://acp-platform.example.test";
+    process.env.OPENCODE_BASE_URL = "https://opencode-platform.example.test";
+    process.env.ACP_API_KEY = process.env.OPENCODE_API_KEY = process.env.ANTHROPIC_API_KEY = "platform-secret";
+    if (owner === "platform") process.env.OCTOPUS_CLAUDE_CODE_MODE = "api-key";
+    else delete process.env.OCTOPUS_CLAUDE_CODE_MODE;
+    for (const status of [401, 402, 403, 429, 503]) {
+      failure = Object.assign(new Error("private provider body"), { status });
+      const count = events.length;
+      try { await createAiMessage({ ...request, model: `${provider}:fixture` }, "org"); assert.fail("Expected failure"); }
+      catch (error) {
+        assert.ok(error instanceof AiProviderFailure);
+        assert.equal(error.keyOwner, owner);
+        assert.equal(error.details.status, status);
+        reportBackgroundFailure(error, context);
+      }
+      assert.equal(events.length - count, owner === "organization" && status !== 503 ? 0 : 1);
+      assert.equal(usedKeys.at(-1), owner === "organization" ? "org-secret" : "platform-secret");
+    }
+    failure = null;
+    assert.equal((await createAiMessage({ ...request, model: `${provider}:fixture` }, "org")).text, "complete");
+  }
+}
+delete process.env.OCTOPUS_CLAUDE_CODE_MODE;
+adapterOrg = { claudeCodeAuthMode: "api-key", anthropicApiKey: "fallback-secret" };
+failure = Object.assign(new Error("private provider body"), { status: 401 });
+try { await createAiMessage({ ...request, model: "claude-code:fixture" }, "org"); assert.fail("Expected failure"); }
+catch (error) { assert.ok(error instanceof AiProviderFailure); assert.equal(error.keyOwner, "organization"); }
+assert.equal(usedKeys.at(-1), "fallback-secret");
+adapterOrg = { claudeCodeAuthMode: "subscription" };
+try { await createAiMessage({ ...request, model: "claude-code:fixture" }, "org"); assert.fail("Expected failure"); }
+catch (error) { assert.ok(error instanceof AiProviderFailure); assert.equal(error.keyOwner, "unknown"); }
+
 const circular = { cause: null as unknown, code: "customer-secret", name: "private@example.test" }; circular.cause = circular;
 assert.deepEqual(safeErrorDetails(circular), { name: "Error" });
 const serialized = JSON.stringify(events);
