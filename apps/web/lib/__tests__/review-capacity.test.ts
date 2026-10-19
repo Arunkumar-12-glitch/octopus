@@ -4,7 +4,7 @@ import { buildGeneratedMatcher } from "../generated-files";
 import { prepareReviewInput, type ReviewInput } from "../review-coverage";
 import { createBinaryAssetEvidence, indexGitHubBinarySections } from "../review-binary-assets";
 import { COMPLETE_REVIEW_POLICY as policy, completeReviewCandidate, createReviewExecutionWindow,
-  generationTimeout, withinReviewWindow } from "../review-capacity";
+  generationTimeout, withinReviewWindow, isReviewCancelled } from "../review-capacity";
 
 function input(): ReviewInput {
   const revision = { provider: "github", headSha: "a".repeat(40), baseSha: "b".repeat(40) };
@@ -67,6 +67,22 @@ describe("complete review candidate", () => {
 });
 
 describe("actual review execution lifetime", () => {
+  it("distinguishes reasonless queue expiry from cancellation using the execution deadline", () => {
+    for (const elapsed of [899999, 900000, 900001]) {
+      let monotonic = 0;
+      const controller = new AbortController();
+      const window = createReviewExecutionWindow({ id: "job", startedOn: new Date(1000000), expireInSeconds: 900,
+        signal: controller.signal }, { epoch: () => 1000000, monotonic: () => monotonic })!;
+      expect(isReviewCancelled(window)).toBe(false);
+      monotonic = elapsed;
+      controller.abort();
+      expect(controller.signal.reason.name).toBe("AbortError");
+      expect(isReviewCancelled(window)).toBe(elapsed < 900000);
+    }
+    expect(isReviewCancelled()).toBe(false);
+    const timeout = new AbortController(); timeout.abort(new DOMException("Deadline", "TimeoutError"));
+    expect(isReviewCancelled({ ...windowFor(), signal: timeout.signal })).toBe(false);
+  });
   it("uses the earlier job deadline and callback duration then only a monotonic clock", () => {
     let epoch = 1000000, monotonic = 20;
     const window = createReviewExecutionWindow({ id: "job", startedOn: new Date(epoch - 30000), expireInSeconds: 900,

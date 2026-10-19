@@ -1,4 +1,5 @@
 import "server-only";
+import { AiProviderFailure, providerKeyOwner } from "./provider-failure";
 import { CapacityAdmissionError, capacityReceipt, refuseCapacity, withinReviewWindow, COMPLETE_REVIEW_POLICY } from "./review-capacity";
 import { prisma } from "@octopus/db";
 import { decryptStringMaybeLegacy } from "@/lib/crypto";
@@ -184,7 +185,7 @@ export async function createAiMessage(
       window.remainingMs() - (admission ? COMPLETE_REVIEW_POLICY.minGenerationMs : 0) - COMPLETE_REVIEW_POLICY.publicationReserveMs, setup) : await setup();
   } catch (error) {
     if (error instanceof CapacityAdmissionError || !admission) throw error;
-    refuseCapacity(admission, capacityReceipt(admission, params.model), "final-check-failed");
+    refuseCapacity(admission, capacityReceipt(admission, params.model), "final-check-failed", error);
   }
   const { provider, orgKey } = route;
   if (admission) {
@@ -203,10 +204,10 @@ export async function createAiMessage(
     const response = await getProvider(provider).create(params, orgKey, orgId);
     return window ? { ...response, usedOwnKey: !!orgKey } : response;
   } catch (error) {
-    if (error instanceof CapacityAdmissionError) throw error;
+    if (error instanceof CapacityAdmissionError || error instanceof AiProviderFailure) throw error;
     const message = error instanceof Error ? error.message : String(error);
     console.error(`[ai-router] ${provider} API error for model ${params.model}:`, message);
-    throw new Error(`AI provider ${provider} failed: ${message}`);
+    throw new AiProviderFailure(error, provider, params.model, providerKeyOwner(provider, !!orgKey));
   }
 }
 

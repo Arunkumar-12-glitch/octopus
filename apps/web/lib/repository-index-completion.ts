@@ -60,6 +60,7 @@ export async function runRepositoryIndex(
       indexStatus: isIndexingCancelled(signal) ? "pending" : "failed",
     } });
     if (!released.count) throw new SupersededIndexError();
+    signal?.throwIfAborted();
     throw error;
   }
 }

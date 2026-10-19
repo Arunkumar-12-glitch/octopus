@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.2] - 2026-10-19
+
+### Fixed
+
+- Report terminal background review and repository indexing failures to Sentry with safe diagnostic context, so handled provider failures are visible to operators. See [background error triage](docs/background-error-triage.md) for incident exclusions and operator verification.
+
+### Upgrade notes
+
+- No database migrations or Slack configuration changes. Update web and review workers together.
+
 ## [1.3.1] - 2026-10-17
 
 ### Fixed

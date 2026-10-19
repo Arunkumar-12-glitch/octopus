@@ -8,17 +8,18 @@ import type { AiCreateParams } from "./index";
 import { CACHE_BREAKPOINT } from "./system-cache";
 import { stripLoneSurrogates } from "./sanitize";
 import { anthropicCountProjection, type AnthropicRequest } from "./anthropic-request";
+import { AiProviderFailure, type KeyOwner } from "../provider-failure";
 
 type CapacityClient = Pick<Anthropic, "baseURL" | "models" | "messages">;
 const positiveInteger = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) > 0;
 
 /** Digest-only, per-attempt evidence. Metadata and count use the generation client's exact account route. */
 export async function admitAnthropicReview(
-  params: AiCreateParams, body: AnthropicRequest, client: CapacityClient,
+  params: AiCreateParams, body: AnthropicRequest, client: CapacityClient, keyOwner: KeyOwner = "unknown",
 ): Promise<{ receipt: CapacityAdmissionReceipt; dispatchTimeout: () => number }> {
   const admission = params.completeReviewAdmission!;
   const receipt = capacityReceipt(admission, params.model);
-  const reject = (reason: CapacityRefusalReason): never => refuseCapacity(admission, receipt, reason);
+  const reject = (reason: CapacityRefusalReason, error?: unknown): never => refuseCapacity(admission, receipt, reason, error);
   const checkTime = (): number => { try { return generationTimeout(admission.window, true); } catch { return reject("execution-window"); } };
   const preflight = async <T>(ms: number, work: (signal: AbortSignal) => Promise<T>): Promise<T> =>
     withinReviewWindow(admission.window, Math.min(ms, admission.window.remainingMs() - policy.minGenerationMs - policy.publicationReserveMs), work);
@@ -47,7 +48,10 @@ export async function admitAnthropicReview(
   let metadata: ModelInfo;
   try {
     metadata = await preflight(policy.metadataTimeoutMs, signal => client.models.retrieve(params.model, {}, { signal, timeout: policy.metadataTimeoutMs, maxRetries: 0 }));
-  } catch { return reject(admission.window.signal.aborted ? "execution-window" : "metadata-unavailable"); }
+  } catch (error) {
+    return reject(admission.window.signal.aborted ? "execution-window" : "metadata-unavailable",
+      new AiProviderFailure(error, "anthropic", params.model, keyOwner));
+  }
   const metadataMonotonic = performance.now();
   if (!metadata || typeof metadata.id !== "string") return reject("unsupported-capability");
   receipt.canonicalModel = metadata.id;
@@ -64,7 +68,10 @@ export async function admitAnthropicReview(
   let counted: { input_tokens: number; _request_id?: string | null };
   try {
     counted = await preflight(policy.countTimeoutMs, signal => client.messages.countTokens(countBody, { signal, timeout: policy.countTimeoutMs, maxRetries: 0 }));
-  } catch { return reject(admission.window.signal.aborted ? "execution-window" : "count-unavailable"); }
+  } catch (error) {
+    return reject(admission.window.signal.aborted ? "execution-window" : "count-unavailable",
+      new AiProviderFailure(error, "anthropic", params.model, keyOwner));
+  }
   const countMonotonic = performance.now();
   if (!counted || !Number.isSafeInteger(counted.input_tokens) || counted.input_tokens < 0) return reject("invalid-count");
   receipt.count = { requestSha256: sha256(JSON.stringify(countBody)), inputTokens: counted.input_tokens,
@@ -84,13 +91,13 @@ export async function admitAnthropicReview(
     if (!estimate) return reject("pricing-unavailable");
     receipt.pricing = estimate.pricing;
     receipt.estimatedPrimaryUsd = estimate.estimateUsd;
-  } catch { return reject("pricing-unavailable"); }
+  } catch (error) { return reject("pricing-unavailable", error); }
   if (receipt.estimatedPrimaryUsd! > policy.maxEstimateUsd) reject("cost-limit");
 
   let finalReason: Awaited<ReturnType<typeof admission.beforeGeneration>>;
   try {
     finalReason = await preflight(policy.countTimeoutMs, signal => admission.beforeGeneration(signal));
-  } catch { return reject(admission.window.signal.aborted ? "execution-window" : "final-check-failed"); }
+  } catch (error) { return reject(admission.window.signal.aborted ? "execution-window" : "final-check-failed", error); }
   if (finalReason) reject(finalReason);
   const dispatchTimeout = (): number => {
     const timeout = checkTime();

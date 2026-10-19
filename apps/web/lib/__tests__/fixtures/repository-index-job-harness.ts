@@ -2,6 +2,8 @@ import { mock } from "bun:test";
 import assert from "node:assert/strict";
 
 mock.module("server-only", () => ({}));
+const sentryEvents: Array<{ tags?: Record<string, unknown>; contexts?: Record<string, Record<string, unknown>> }> = [];
+mock.module("@sentry/nextjs", () => ({ captureEvent: (event: typeof sentryEvents[number]) => { sentryEvents.push(event); return "e".repeat(32); } }));
 const row = {
   id: "repo-1", provider: "github", organizationId: "org-1", fullName: "acme/new", defaultBranch: "main",
   installationId: 123, indexStatus: "pending", totalFiles: 0,
@@ -80,7 +82,7 @@ mock.module("@/lib/indexer", () => ({
   indexRepository: async (...args: unknown[]) => {
     indexCalls.push(args);
     if (cancelled) { controller.abort(); throw controller.signal.reason; }
-    if (timedOut) { assert.ok(timeoutCallback); timeoutCallback(); throw controller.signal.reason; }
+    if (timedOut) { assert.ok(timeoutCallback); timeoutCallback(); throw new Error("Indexing cancelled"); }
     if (replaceAttempt) {
       Object.assign(currentRow!, { indexStatus: "indexing", indexAttemptId: "replacement" });
       throw new Error("Old worker failed after replacement");
@@ -132,7 +134,11 @@ assert.equal(indexCalls.length, 1, "disconnected or mismatched installations mus
 
 currentRow = row;
 indexFailure = new Error("GitHub unavailable");
-await assert.rejects(() => processRepositoryIndex(job), /GitHub unavailable/);
+await assert.rejects(() => processRepositoryIndex(job, { retryCount: 0, retryLimit: 2 }), /GitHub unavailable/);
+assert.equal(sentryEvents.length, 0, "a scheduled retry is not a terminal failure");
+await assert.rejects(() => processRepositoryIndex(job, { retryCount: 2, retryLimit: 2 }), /GitHub unavailable/);
+assert.equal(sentryEvents.length, 1);
+assert.equal(sentryEvents[0].tags?.failure_stage, "indexing");
 assert.equal(claims.at(-1)?.data.indexStatus, "failed", "failures must release the claim for retry");
 indexFailure = null;
 await processRepositoryIndex(job);
@@ -144,12 +150,21 @@ assert.equal(indexCalls.at(-1)?.[3], 0);
 assert.equal(indexCalls.at(-1)?.[6], "forgejo", "Forgejo jobs must not use GitHub authentication");
 
 cancelled = true;
+const beforeCancellation = sentryEvents.length;
 await processRepositoryIndex(job);
+assert.equal(sentryEvents.length, beforeCancellation, "cancelled work is not a platform incident");
 assert.equal(claims.at(-1)?.data.indexStatus, "pending", "cancelled work must release its claim");
 assert.equal(notifications.at(-1), "pending");
 cancelled = false;
 timedOut = true;
-await assert.rejects(() => processRepositoryIndex(job), { name: "TimeoutError" });
+const beforeTimeout = sentryEvents.length;
+await assert.rejects(() => processRepositoryIndex(job, { retryCount: 1, retryLimit: 2 }), { name: "TimeoutError" });
+assert.equal(sentryEvents.length, beforeTimeout);
+await assert.rejects(() => processRepositoryIndex(job, { retryCount: 2, retryLimit: 2 }), { name: "TimeoutError" });
+assert.equal(sentryEvents.length, beforeTimeout + 1);
+assert.equal(sentryEvents.at(-1)?.contexts?.background_failure?.name, "TimeoutError");
+assert.equal(sentryEvents.at(-1)?.contexts?.background_failure?.attemptId, currentRow?.indexAttemptId);
+assert.equal(sentryEvents.at(-1)?.contexts?.background_failure?.retryCount, 2);
 assert.equal(currentRow?.indexStatus, "failed");
 assert.equal(notifications.at(-1), "failed");
 assert.equal(currentRow?.firstIndexedAt, null);

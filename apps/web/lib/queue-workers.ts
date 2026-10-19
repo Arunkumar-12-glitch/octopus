@@ -1,8 +1,9 @@
+import { reportBackgroundFailure } from "./background-failure";
 import { cleanupForgejoConnectorRequests } from "./forgejo-connector";
 import type { PgBoss } from "pg-boss";
 import { sendWelcomeEmail } from "./emails/welcome";
 import { processReview } from "./reviewer";
-import { createReviewExecutionWindow } from "./review-capacity";
+import { createReviewExecutionWindow, isReviewCancelled } from "./review-capacity";
 import {
   handleLargeReviewResult,
   type LargeReviewResultJob,
@@ -56,8 +57,15 @@ export async function registerWorkers(boss: PgBoss, config: QueueConfig): Promis
     }
   });
 
-  await boss.work<RepositoryIndexJob>("index-repository", { localConcurrency: 1 }, async (jobs) => {
-    for (const job of jobs) await processRepositoryIndex(job.data);
+  await boss.work<RepositoryIndexJob>("index-repository", { localConcurrency: 1, includeMetadata: true }, async (jobs) => {
+    for (const job of jobs) {
+      const retry = { retryCount: job.retryCount, retryLimit: job.retryLimit };
+      try { await processRepositoryIndex(job.data, retry); }
+      catch (error) {
+        reportBackgroundFailure(error, { stage: "indexing", attemptId: job.id, repositoryId: job.data?.repositoryId, retry });
+        throw error;
+      }
+    }
   });
 
   await boss.work<WelcomeEmailJob>("welcome-email", async (jobs) => {
@@ -73,9 +81,12 @@ export async function registerWorkers(boss: PgBoss, config: QueueConfig): Promis
     async (jobs) => {
       for (const job of jobs) {
         console.log(`[queue] Processing review for PR ${job.data.pullRequestId}`);
+        const executionWindow = createReviewExecutionWindow(job);
         try {
-          await processReview(job.data.pullRequestId, createReviewExecutionWindow(job));
+          await processReview(job.data.pullRequestId, executionWindow, job.retryCount);
         } catch (err) {
+          reportBackgroundFailure(err, { stage: "review", pullRequestId: job.data.pullRequestId,
+            attemptId: job.id, cancelled: isReviewCancelled(executionWindow), retry: { retryCount: job.retryCount, retryLimit: job.retryLimit } });
           console.error(`[queue] Review failed for PR ${job.data.pullRequestId} (job ${job.id}):`, err);
           throw err;
         }

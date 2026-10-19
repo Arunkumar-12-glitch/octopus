@@ -4,6 +4,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import type { Provider, AiCreateParams, AiResponse } from "./index";
 import { prepareAnthropicRequest, freezeRequest, usesNativeJsonOutput, type AnthropicRequest } from "./anthropic-request";
 import { admitAnthropicReview } from "./anthropic-capacity";
+import { providerKeyOwner } from "../provider-failure";
 import { generationTimeout, CapacityAdmissionError, capacityReceipt, refuseCapacity, type CapacityAdmissionReceipt } from "../review-capacity";
 
 let platformClient: Anthropic | null = null;
@@ -41,7 +42,7 @@ export const anthropicProvider: Provider = {
       const prepared = prepareAnthropicRequest(params, process.env.PROMPT_CACHE_TTL === "5m" ? "5m" : "1h");
       body = params.completeReviewAdmission ? freezeRequest(prepared) : prepared;
       if (params.completeReviewAdmission) {
-        const admitted = await admitAnthropicReview(params, body, client);
+        const admitted = await admitAnthropicReview(params, body, client, providerKeyOwner("anthropic", !!apiKey));
         admission = admitted.receipt;
         admittedTimeout = admitted.dispatchTimeout;
       }

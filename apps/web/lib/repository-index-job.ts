@@ -1,4 +1,5 @@
 import "server-only";
+import { reportBackgroundFailure, type RetryState } from "./background-failure";
 import { randomUUID } from "node:crypto";
 import { runRepositoryIndex, SupersededIndexError, isIndexingCancelled } from "@/lib/repository-index-completion";
 import { prisma } from "@octopus/db";
@@ -47,7 +48,7 @@ export async function enqueuePendingRepositoryIndexes(organizationId: string, re
   }
 }
 
-export async function processRepositoryIndex(job: RepositoryIndexJob) {
+export async function processRepositoryIndex(job: RepositoryIndexJob, retry?: RetryState) {
   if (!job || typeof job.repositoryId !== "string" || !job.repositoryId ||
       typeof job.organizationId !== "string" || !job.organizationId) {
     throw new Error("Repository indexing requires repositoryId and organizationId");
@@ -100,7 +101,10 @@ export async function processRepositoryIndex(job: RepositoryIndexJob) {
     const isCancelled = isIndexingCancelled(controller.signal);
     log(`Indexing failed: ${error instanceof Error ? error.message : String(error)}`, "error");
     void notifyRepositoryIndex(channel, repo.id);
-    if (!isCancelled) throw error;
+    if (!isCancelled) {
+      reportBackgroundFailure(error, { stage: "indexing", attemptId: indexAttemptId, repositoryId: repo.id, retry });
+      throw error;
+    }
   } finally {
     clearTimeout(timeout);
     clearAbortController(indexAttemptId);

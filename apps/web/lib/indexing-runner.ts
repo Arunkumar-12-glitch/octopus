@@ -1,4 +1,5 @@
 import "server-only";
+import { reportBackgroundFailure } from "./background-failure";
 import { runRepositoryIndex, SupersededIndexError, isIndexingCancelled } from "@/lib/repository-index-completion";
 import { prisma } from "@octopus/db";
 import { notifyRepositoryIndex } from "@/lib/repository-index-notifications";
@@ -77,6 +78,7 @@ export async function runIndexingInBackground(
       emitLog("Indexing cancelled by user", "warning");
       void notifyRepositoryIndex(channel, repoId);
     } else {
+      reportBackgroundFailure(error, { stage: "indexing", repositoryId: repoId, attemptId: indexAttemptId });
       emitLog(`Indexing failed: ${errorMsg}`, "error");
       eventBus.emit({
         type: "repo-indexed",

@@ -1,4 +1,5 @@
 import "server-only";
+import { AiProviderFailure, type KeyOwner } from "../provider-failure";
 import { prisma } from "@octopus/db";
 import { decryptStringMaybeLegacy } from "@/lib/crypto";
 import type { Provider, AiCreateParams, AiResponse } from "./index";
@@ -19,7 +20,7 @@ import { validateProviderUrl } from "./url-validation";
  * operator-controlled and may legitimately point at an internal host, so it is
  * only normalized to an origin (private ranges allowed).
  */
-async function resolveConfig(orgId?: string | null): Promise<{ baseUrl: string; apiKey: string } | null> {
+async function resolveConfig(orgId?: string | null): Promise<{ baseUrl: string; apiKey: string; keyOwner: KeyOwner } | null> {
   // Per-org config overrides the deployment env default.
   if (orgId) {
     const org = await prisma.organization.findUnique({
@@ -27,12 +28,12 @@ async function resolveConfig(orgId?: string | null): Promise<{ baseUrl: string; 
       select: { opencodeBaseUrl: true, opencodeApiKey: true },
     });
     if (org?.opencodeBaseUrl && org?.opencodeApiKey) {
-      return { baseUrl: validateProviderUrl(org.opencodeBaseUrl), apiKey: decryptStringMaybeLegacy(org.opencodeApiKey) };
+      return { baseUrl: validateProviderUrl(org.opencodeBaseUrl), apiKey: decryptStringMaybeLegacy(org.opencodeApiKey), keyOwner: "organization" };
     }
   }
   const envBase = process.env.OPENCODE_BASE_URL;
   const envKey = process.env.OPENCODE_API_KEY;
-  if (envBase && envKey) return { baseUrl: validateProviderUrl(envBase, { hosted: false }), apiKey: envKey };
+  if (envBase && envKey) return { baseUrl: validateProviderUrl(envBase, { hosted: false }), apiKey: envKey, keyOwner: "platform" };
   return null;
 }
 
@@ -51,11 +52,15 @@ export const opencodeProvider: Provider = {
           "configure opencodeBaseUrl and opencodeApiKey on the organization.",
       );
     }
-    return callOpenAiGateway(params, {
-      name: "opencode",
-      modelPrefix: "opencode:",
-      baseUrl: config.baseUrl,
-      apiKey: config.apiKey,
-    });
+    try {
+      return await callOpenAiGateway(params, {
+        name: "opencode",
+        modelPrefix: "opencode:",
+        baseUrl: config.baseUrl,
+        apiKey: config.apiKey,
+      });
+    } catch (error) {
+      throw new AiProviderFailure(error, "opencode", params.model, config.keyOwner);
+    }
   },
 };

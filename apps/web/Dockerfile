@@ -57,6 +57,7 @@ RUN --mount=type=secret,id=sentry_auth_token \
     export SENTRY_AUTH_TOKEN="$(cat /run/secrets/sentry_auth_token 2>/dev/null || true)" && \
     cd apps/web && bun run build
 RUN cd apps/web && bun build scripts/rc-acceptance.ts --target=node --outfile=/app/rc-acceptance.mjs
+RUN cd apps/web && bun run scripts/build-sentry-smoke.ts /app/sentry-smoke.mjs
 
 # --- runner ---
 FROM node:22-alpine AS runner
@@ -71,6 +72,7 @@ COPY --from=builder --chown=nextjs:nodejs /app/apps/web/public ./apps/web/public
 COPY --from=builder --chown=nextjs:nodejs /app/apps/web/.next/static ./apps/web/.next/static
 COPY --from=builder --chown=nextjs:nodejs /app/CHANGELOG.md ./CHANGELOG.md
 COPY --from=builder --chown=nextjs:nodejs /app/rc-acceptance.mjs ./rc-acceptance.mjs
+COPY --from=builder --chown=nextjs:nodejs /app/sentry-smoke.mjs ./apps/web/sentry-smoke.mjs
 
 USER nextjs
 EXPOSE 3000
