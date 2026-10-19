@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Report terminal background review and repository indexing failures to Sentry with safe diagnostic context, so handled provider failures are visible to operators. Expected credit limits and known customer API-key failures remain separate from platform incidents.
+- Report terminal background review and repository indexing failures to Sentry with safe diagnostic context, so handled provider failures are visible to operators. See [background error triage](docs/background-error-triage.md) for incident exclusions and operator verification.
 
 ### Upgrade notes
 
