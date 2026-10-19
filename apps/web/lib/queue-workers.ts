@@ -1,3 +1,4 @@
+import { reportBackgroundFailure } from "./background-failure";
 import { cleanupForgejoConnectorRequests } from "./forgejo-connector";
 import type { PgBoss } from "pg-boss";
 import { sendWelcomeEmail } from "./emails/welcome";
@@ -56,8 +57,15 @@ export async function registerWorkers(boss: PgBoss, config: QueueConfig): Promis
     }
   });
 
-  await boss.work<RepositoryIndexJob>("index-repository", { localConcurrency: 1 }, async (jobs) => {
-    for (const job of jobs) await processRepositoryIndex(job.data);
+  await boss.work<RepositoryIndexJob>("index-repository", { localConcurrency: 1, includeMetadata: true }, async (jobs) => {
+    for (const job of jobs) {
+      const retry = { retryCount: job.retryCount, retryLimit: job.retryLimit };
+      try { await processRepositoryIndex(job.data, retry); }
+      catch (error) {
+        reportBackgroundFailure(error, { stage: "indexing", attemptId: job.id, repositoryId: job.data?.repositoryId, retry });
+        throw error;
+      }
+    }
   });
 
   await boss.work<WelcomeEmailJob>("welcome-email", async (jobs) => {
@@ -76,6 +84,8 @@ export async function registerWorkers(boss: PgBoss, config: QueueConfig): Promis
         try {
           await processReview(job.data.pullRequestId, createReviewExecutionWindow(job));
         } catch (err) {
+          reportBackgroundFailure(err, { stage: "review", pullRequestId: job.data.pullRequestId,
+            attemptId: job.id, retry: { retryCount: job.retryCount, retryLimit: job.retryLimit } });
           console.error(`[queue] Review failed for PR ${job.data.pullRequestId} (job ${job.id}):`, err);
           throw err;
         }

@@ -1,4 +1,5 @@
 import "server-only";
+import { AiProviderFailure, providerKeyOwner } from "./provider-failure";
 import { CapacityAdmissionError, capacityReceipt, refuseCapacity, withinReviewWindow, COMPLETE_REVIEW_POLICY } from "./review-capacity";
 import { prisma } from "@octopus/db";
 import { decryptStringMaybeLegacy } from "@/lib/crypto";
@@ -206,7 +207,7 @@ export async function createAiMessage(
     if (error instanceof CapacityAdmissionError) throw error;
     const message = error instanceof Error ? error.message : String(error);
     console.error(`[ai-router] ${provider} API error for model ${params.model}:`, message);
-    throw new Error(`AI provider ${provider} failed: ${message}`);
+    throw new AiProviderFailure(error, provider, params.model, providerKeyOwner(provider, !!orgKey));
   }
 }
 

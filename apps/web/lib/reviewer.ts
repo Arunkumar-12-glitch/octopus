@@ -1,4 +1,5 @@
 import "server-only";
+import { reportBackgroundFailure, type FailureStage } from "./background-failure";
 import { ReviewOutcomeRecorder, startReviewOutcome, deferReviewOutcome } from "@/lib/review-attempt-outcome";
 import { runRepositoryIndex, SupersededIndexError } from "@/lib/repository-index-completion";
 import crypto from "node:crypto";
@@ -57,7 +58,7 @@ import { getGithubAppConfig } from "@/lib/github-app-config";
 import { parseOctopusIgnore, detectBadCommits } from "@/lib/octopus-ignore";
 import { buildGeneratedMatcher } from "@/lib/generated-files";
 import { MAX_DIFF_CHARS } from "@/lib/diff-truncate";
-import { completeReviewCandidate, reviewCandidateSha256, assertReviewProcessingActive, ReviewProcessingExpiredError, type CompleteReviewAdmission, type ReviewExecutionWindow } from "@/lib/review-capacity";
+import { CapacityAdmissionError, completeReviewCandidate, reviewCandidateSha256, assertReviewProcessingActive, ReviewProcessingExpiredError, type CompleteReviewAdmission, type ReviewExecutionWindow } from "@/lib/review-capacity";
 import { confirmCompleteReviewCurrent } from "@/lib/review-capacity-current";
 import { prepareReviewInput, applyReviewCoverage, coverageSummary, reviewCheckResult, reviewAssessmentComplete, type ReviewInput, type ReviewCoverage } from "@/lib/review-coverage";
 import { prepareReviewComment } from "@/lib/review-comment-context";
@@ -717,6 +718,7 @@ async function processReviewInternal(pullRequestId: string, executionWindow?: Re
   const attemptId = crypto.randomUUID();
   let adaptiveProcessingWindow: ReviewExecutionWindow | undefined;
   let attemptCoverage: ReviewCoverage | undefined;
+  let failureStage: FailureStage = "review";
   let attemptSaved = false;
   const outcomeRecord = new ReviewOutcomeRecorder(outcomeKey);
   let recordReviewMain = false;
@@ -948,6 +950,7 @@ async function processReviewInternal(pullRequestId: string, executionWindow?: Re
 
   try {
     if (!isForgejoConnector) reviewCommentId = await publishMainComment("> 🐙 **Octopus Review** — Preparing review...");
+    failureStage = "indexing";
     // Phase 0: Ensure the repository is indexed before preparing review context
     if (repo.indexStatus !== "indexed") {
       console.log(`[reviewer] Repository ${repo.fullName} not indexed (status: ${repo.indexStatus}). Starting auto-index...`);
@@ -1103,6 +1106,7 @@ async function processReviewInternal(pullRequestId: string, executionWindow?: Re
       }
     }
 
+    failureStage = "preparation";
     // Spend limit check. Distinguish "out of credits" from "monthly cap": a
     // brand-new org that never got credit must not be told it "exceeded a
     // monthly limit", and the two reasons must be separable in the reviews
@@ -1819,6 +1823,7 @@ async function processReviewInternal(pullRequestId: string, executionWindow?: Re
       repoConfig: repoConfigUserBlock,
     });
     adaptiveProcessingWindow = completeReviewAdmission?.window;
+    failureStage = "generation";
     const response = await executeCoveredReview({ ...primaryRequest, ...(completeReviewAdmission ? { completeReviewAdmission } : {}) },
       coverage, getSystemPrompt(), request => createAiMessage(request, org.id));
     const assertProcessingActive = () => { if (completeReviewAdmission) assertReviewProcessingActive(completeReviewAdmission.window); };
@@ -1859,6 +1864,7 @@ async function processReviewInternal(pullRequestId: string, executionWindow?: Re
     const findingsCount = countFindings(reviewBody);
     console.log(`[reviewer] Review generated: ${reviewBody.length} chars, ${findingsCount} findings`);
 
+    failureStage = "publication";
     // Step 5: Post review to PR
     await emitReviewStatus(org.id, {
       ...baseEvent,
@@ -2648,6 +2654,11 @@ async function processReviewInternal(pullRequestId: string, executionWindow?: Re
       errorMessage,
     })
       .catch((e) => console.error("[reviewer] Failed to update PR status:", e));
+    if (failedUpdate?.count === 0) return;
+    if (!(err instanceof SupersededIndexError) && !(err instanceof CapacityAdmissionError)) {
+      reportBackgroundFailure(err, { stage: failureStage, attemptId: failureAttemptId,
+        repositoryId: repo.id, pullRequestId: pr.id, headSha: pr.headSha, requestVersion: pr.reviewRequestVersion });
+    }
     if (!failedUpdate?.count) return;
 
     await emitReviewStatus(org.id, {

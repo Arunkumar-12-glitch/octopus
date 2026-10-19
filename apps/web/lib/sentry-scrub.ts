@@ -32,6 +32,18 @@ export function parseRate(raw: string | undefined, fallback: number): number {
 
 /** Drop request headers/cookies and redact sensitive keys from an event. */
 export function scrubEvent(event: ErrorEvent): ErrorEvent {
+  if (event.tags?.error_boundary === "background") {
+    // A caught SDK error must not inherit request/user/console payloads from its worker scope.
+    delete event.request;
+    delete event.user;
+    delete event.extra;
+    delete event.breadcrumbs;
+    delete event.exception;
+    delete event.transaction;
+    event.contexts = { background_failure: event.contexts?.background_failure };
+    event.tags = Object.fromEntries(Object.entries(event.tags).filter(([key]) =>
+      ["error_boundary", "failure_stage", "failure_owner", "failure_code", "provider", "outcome"].includes(key)));
+  }
   if (event.request) {
     delete (event.request as { cookies?: unknown }).cookies;
     delete (event.request as { headers?: unknown }).headers;

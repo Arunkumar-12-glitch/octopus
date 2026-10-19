@@ -5,6 +5,8 @@ import type { AiCreateParams } from "@/lib/providers";
 import { assertReviewProcessingActive, type ReviewExecutionWindow } from "@/lib/review-capacity";
 import type { ReviewCoverage } from "@/lib/review-coverage";
 mock.module("server-only", () => ({}));
+const sentryEvents: Array<{ tags?: Record<string, unknown>; contexts?: Record<string, Record<string, unknown>> }> = [];
+mock.module("@sentry/nextjs", () => ({ captureEvent: (event: typeof sentryEvents[number]) => { sentryEvents.push(event); return "e".repeat(32); } }));
 const directCommentFailure = process.argv.includes("--direct-forgejo-comment-failure");
 const preserveAutoReview = process.argv.includes("--preserve-auto-review");
 const firstCompletion = process.argv.includes("--first-review-completion");
@@ -478,6 +480,7 @@ await processReview("pr");
 assert.equal((archived.at(-1)!.coverage as ReviewCoverage).assessment?.state, "completed");
 responseOverride = null;
 providerInterrupted = true;
+const beforeSentryFailure = sentryEvents.length;
 const errorLog = console.error;
 console.error = () => {};
 try {
@@ -485,6 +488,9 @@ try {
   assert.equal((archived.at(-1)!.coverage as ReviewCoverage).complete, true);
   assert.equal((archived.at(-1)!.coverage as ReviewCoverage).assessment?.state, "incomplete");
   assert.equal((archived.at(-1)!.coverage as ReviewCoverage).assessment?.reason, "Provider request failed or was interrupted");
+  assert.equal(sentryEvents.length, beforeSentryFailure + 1, "caught provider failure must reach Sentry exactly once");
+  assert.equal(sentryEvents.at(-1)?.tags?.failure_stage, "generation");
+  assert.equal(sentryEvents.at(-1)?.contexts?.background_failure?.pullRequestId, "pr");
 } finally { providerInterrupted = false; console.error = errorLog; }
 // Lookup outages retain full assessment and keep the provider-output gate.
 lookupFailure = true;
