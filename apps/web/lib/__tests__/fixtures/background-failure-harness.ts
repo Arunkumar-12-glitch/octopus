@@ -37,7 +37,6 @@ mock.module("@anthropic-ai/sdk", () => ({ default: class {
     return { content: [{ type: "text", text: "complete" }], stop_reason: "end_turn", usage: { input_tokens: 1, output_tokens: 1 } };
   } }) };
 } }));
-mock.module("node:child_process", () => ({ spawn: () => { throw new Error("CLI unavailable"); } }));
 const { acpProvider } = await import("../../providers/acp");
 const { opencodeProvider } = await import("../../providers/opencode");
 const { claudeCodeProvider } = await import("../../providers/claude-code");
@@ -89,14 +88,12 @@ failure = null;
 assert.equal((await createAiMessage(request, "org")).text, "complete");
 assert.equal(events.length, before + 1, "success does not emit a failure");
 assert.equal(providerKeyOwner("ollama", false), "unknown");
-const cancellation = new AbortController(); cancellation.abort();
 const beforeCancelled = events.length;
-reportBackgroundFailure(new Error("Indexing cancelled"), { ...context, signal: cancellation.signal });
+reportBackgroundFailure(new Error("Indexing cancelled"), { ...context, cancelled: true });
 assert.equal(events.length, beforeCancelled);
 reportBackgroundFailure(new Error("Indexing cancelled"), context);
 assert.equal(events.length, beforeCancelled + 1, "a message alone does not prove cancellation");
-const timeout = new AbortController(); timeout.abort(new DOMException("Deadline", "TimeoutError"));
-reportBackgroundFailure(timeout.signal.reason, { ...context, signal: timeout.signal });
+reportBackgroundFailure(new DOMException("Deadline", "TimeoutError"), context);
 assert.equal(events.length, beforeCancelled + 2);
 reportBackgroundFailure(new AiProviderFailure(new Error("terminated"), "anthropic", request.model, "platform"), { ...context, synthetic: true });
 assert.equal(events.at(-1)?.tags?.synthetic, "true");
@@ -139,8 +136,14 @@ try { await createAiMessage({ ...request, model: "claude-code:fixture" }, "org")
 catch (error) { assert.ok(error instanceof AiProviderFailure); assert.equal(error.keyOwner, "organization"); }
 assert.equal(usedKeys.at(-1), "fallback-secret");
 adapterOrg = { claudeCodeAuthMode: "subscription" };
+const originalPath = process.env.PATH;
+process.env.PATH = "";
 try { await createAiMessage({ ...request, model: "claude-code:fixture" }, "org"); assert.fail("Expected failure"); }
-catch (error) { assert.ok(error instanceof AiProviderFailure); assert.equal(error.keyOwner, "unknown"); }
+catch (error) {
+  assert.ok(error instanceof AiProviderFailure);
+  assert.equal(error.keyOwner, "unknown");
+  assert.match(error.message, /Executable not found/);
+} finally { process.env.PATH = originalPath; }
 
 const circular = { cause: null as unknown, code: "customer-secret", name: "private@example.test" }; circular.cause = circular;
 assert.deepEqual(safeErrorDetails(circular), { name: "Error" });

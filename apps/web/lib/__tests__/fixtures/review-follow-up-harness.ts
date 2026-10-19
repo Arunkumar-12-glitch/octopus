@@ -28,8 +28,8 @@ let malformed = false;
 let responseOverride: string | null = null;
 let providerInterrupted = false;
 let capacityReason: CapacityRefusalReason = "metadata-unavailable";
-let capacityAbort: "cancel" | "timeout" | null = null;
-let adaptiveStage: "admission" | "generation-cancel" | "generation-timeout" | "before-validator" | "during-validator" | "expired-validator" | "after-save" | "summary-send" | "check-send" | "summary-timeout" | "gitlab-auth" | "transport-control" | "gitlab-transport-control" | null = null;
+let capacityAbort: "cancel" | "timeout" | "expired" | null = null;
+let adaptiveStage: "admission" | "generation-cancel" | "generation-timeout" | "generation-expired" | "before-validator" | "during-validator" | "expired-validator" | "after-save" | "summary-send" | "check-send" | "summary-timeout" | "gitlab-auth" | "transport-control" | "gitlab-transport-control" | null = null;
 let adaptiveAbort = new AbortController();
 let adaptiveRemaining = 900000;
 let validatorCalls = 0;
@@ -42,7 +42,8 @@ globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
   if (adaptiveStage === "transport-control") throw new Error("Unrelated transport error");
   if (adaptiveStage === "summary-timeout") {
     adaptiveRemaining = 0;
-    throw new DOMException("Deadline elapsed", "TimeoutError");
+    adaptiveAbort.abort();
+    throw adaptiveAbort.signal.reason;
   }
   adaptiveAbort.abort();
   init.signal.throwIfAborted();
@@ -142,14 +143,16 @@ mock.module("@/lib/ai-router", () => ({ getProviderForModel: async () => {
     const { capacityReceipt, refuseCapacity } = await import("@/lib/review-capacity");
     const receipt = capacityReceipt(params.completeReviewAdmission, params.model);
     if (adaptiveStage === "admission") {
-      if (capacityAbort) adaptiveAbort.abort(new DOMException("fixture", capacityAbort === "timeout" ? "TimeoutError" : "AbortError"));
+      if (capacityAbort === "expired") { adaptiveRemaining = 0; adaptiveAbort.abort(); }
+      else if (capacityAbort) adaptiveAbort.abort(new DOMException("fixture", capacityAbort === "timeout" ? "TimeoutError" : "AbortError"));
       refuseCapacity(params.completeReviewAdmission, receipt, capacityReason);
     }
     receipt.state = "admitted"; receipt.primaryDispatch = "started";
     params.completeReviewAdmission.onDecision?.(receipt);
     observeAiRequest(params, "anthropic", { model: params.model, messages: params.messages });
-    if (adaptiveStage === "generation-cancel" || adaptiveStage === "generation-timeout") {
-      adaptiveAbort.abort(new DOMException("fixture", adaptiveStage === "generation-timeout" ? "TimeoutError" : "AbortError"));
+    if (adaptiveStage === "generation-cancel" || adaptiveStage === "generation-timeout" || adaptiveStage === "generation-expired") {
+      if (adaptiveStage === "generation-expired") { adaptiveRemaining = 0; adaptiveAbort.abort(); }
+      else adaptiveAbort.abort(new DOMException("fixture", adaptiveStage === "generation-timeout" ? "TimeoutError" : "AbortError"));
       throw new Error("Provider interrupted");
     }
     return { model: params.model, provider: "anthropic", completion: { state: "completed", reason: "end_turn" },
@@ -164,7 +167,7 @@ mock.module("@/lib/review-validation", () => ({
   validateFindings: async (findings: unknown[]) => {
     validatorCalls++;
     if (adaptiveStage === "during-validator") adaptiveAbort.abort();
-    if (adaptiveStage === "expired-validator") adaptiveRemaining = 0;
+    if (adaptiveStage === "expired-validator") { adaptiveRemaining = 0; adaptiveAbort.abort(); }
     return findings;
   },
 }));
@@ -553,7 +556,7 @@ assert.ok(summaries.at(-1)?.includes("Review coverage"));
 // The real hosted post-primary pipeline must not publish a scored completion after cancellation.
 nativeFailure = false;
 for (const reason of ["metadata-unavailable", "count-unavailable", "pricing-unavailable", "final-check-failed", "context-limit", "billing-blocked", "stale-review"] as const) {
-  for (const abort of [null, "cancel", "timeout"] as const) {
+  for (const abort of [null, "cancel", "timeout", "expired"] as const) {
     capacityReason = reason; capacityAbort = abort; adaptiveStage = "admission";
     adaptiveAbort = new AbortController(); adaptiveRemaining = 900000;
     const before = sentryEvents.length;
@@ -566,7 +569,7 @@ for (const reason of ["metadata-unavailable", "count-unavailable", "pricing-unav
   }
 }
 capacityAbort = null;
-for (const stage of ["generation-cancel", "generation-timeout", "before-validator", "during-validator", "expired-validator", "after-save"] as const) {
+for (const stage of ["generation-cancel", "generation-timeout", "generation-expired", "before-validator", "during-validator", "expired-validator", "after-save"] as const) {
   adaptiveStage = stage; adaptiveAbort = new AbortController(); adaptiveRemaining = 900000;
   const before = archived.length, validations = validatorCalls, checks = checkConclusions.length;
   const beforeIncidents = sentryEvents.length;
@@ -575,7 +578,7 @@ for (const stage of ["generation-cancel", "generation-timeout", "before-validato
     await processReview("pr", { jobId: "synthetic-adaptive", deadlineEpochMs: Date.now() + 900000,
       signal: adaptiveAbort.signal, remainingMs: () => adaptiveRemaining });
   } finally { console.error = errors; }
-  assert.equal(sentryEvents.length - beforeIncidents, ["expired-validator", "generation-timeout"].includes(stage) ? 1 : 0, stage);
+  assert.equal(sentryEvents.length - beforeIncidents, ["expired-validator", "generation-timeout", "generation-expired"].includes(stage) ? 1 : 0, stage);
   const failed = archived.at(-1)!;
   const coverage = failed.coverage as ReviewCoverage;
   assert.equal(coverage.assessment?.state, "incomplete", stage);

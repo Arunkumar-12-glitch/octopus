@@ -8,6 +8,9 @@ const sentryEvents: Array<{ tags?: Record<string, unknown>; contexts?: Record<st
 mock.module("@sentry/nextjs", () => ({ captureEvent: (event: typeof sentryEvents[number]) => { sentryEvents.push(event); return "e".repeat(32); } }));
 const { reportBackgroundFailure } = await import("../../background-failure");
 let providerStatus: number | undefined;
+let pricingFailure: Error | undefined;
+let organizationFailure: Error | undefined;
+let revisionFailure: Error | undefined;
 // Every external boundary is synthetic. Any unexpected HTTP access fails immediately.
 globalThis.fetch = (() => { throw new Error("Unexpected network access in capacity harness"); }) as typeof fetch;
 let provider = "anthropic";
@@ -21,8 +24,11 @@ const charges: number[] = [];
 mock.module("../../credits", () => ({ deductCredits: async (_org: string, amount: number) => { charges.push(amount); } }));
 const db = {
   aiUsage: { create: async ({ data }: { data: { usedOwnKey: boolean } }) => { usageRow = data; return { id: "usage" }; }, update: async () => ({}) },
-  availableModel: { findMany: async () => [{ modelId: "claude-fable-5-1", provider, inputPrice: 0, outputPrice: 0 }] },
-  organization: { findUnique: async () => org },
+  availableModel: { findMany: async (query: { select?: { inputPrice?: boolean } }) => {
+    if (pricingFailure && query.select?.inputPrice) throw pricingFailure;
+    return [{ modelId: "claude-fable-5-1", provider, inputPrice: 0, outputPrice: 0 }];
+  } },
+  organization: { findUnique: async () => { if (organizationFailure) throw organizationFailure; return org; } },
   reviewAttempt: { createMany: async ({ data }: { data: NonNullable<typeof saved>[] }) => { saved = structuredClone(data[0]); return { count: 1 }; } },
   pullRequest: { updateMany: async () => ({ count: 1 }),
     findFirst: async ({ where }: { where: typeof claim }) => Object.keys(where).every(key => where[key as keyof typeof where] === claim[key as keyof typeof claim])
@@ -31,6 +37,7 @@ const db = {
 mock.module("@octopus/db", () => ({ prisma: { ...db, $transaction: (fn: (tx: typeof db) => unknown) => fn(db) } }));
 mock.module("../../crypto", () => ({
   decryptStringMaybeLegacy: (value: string) => value,
+  encryptString: () => { throw new Error("Unexpected credential encryption in capacity harness"); },
   encryptJson: () => { throw new Error("Unexpected connector encryption in capacity harness"); },
   decryptJson: () => { throw new Error("Unexpected connector decryption in capacity harness"); },
 }));
@@ -91,14 +98,15 @@ const { createAiMessage } = await import("../../ai-router");
 const { estimateCompleteReviewCost, getOrgSpendLimitStatus, getModelPricing } = await import("../../cost");
 const { executeCoveredReview } = await import("../../review-assessment");
 const { prepareReviewInput, applyReviewCoverage, reviewCheckResult, sha256 } = await import("../../review-coverage");
-const { CapacityAdmissionError, COMPLETE_REVIEW_POLICY: policy } = await import("../../review-capacity");
+const { CapacityAdmissionError, isReviewCancelled, COMPLETE_REVIEW_POLICY: policy } = await import("../../review-capacity");
 const { prepareAnthropicRequest, freezeRequest, anthropicCountProjection } = await import("../../providers/anthropic-request");
 const { admitAnthropicReview } = await import("../../providers/anthropic-capacity");
 const { saveReviewAttempt } = await import("../../review-attempt");
 const { confirmCompleteReviewCurrent } = await import("../../review-capacity-current");
+const { GithubRateLimitError } = await import("../../github");
 const currentCheck = (signal: AbortSignal) => confirmCompleteReviewCurrent({ pullRequestId: "synthetic-pr", orgId: "synthetic", repoId: "repo",
   model: policy.model, headSha: "a".repeat(40), baseSha: "b".repeat(40), reviewRequestVersion: 3,
-  fetchRevision: async () => ({ ...remote }),
+  fetchRevision: async () => { if (revisionFailure) throw revisionFailure; return { ...remote }; },
 }, signal);
 
 function reset() {
@@ -106,7 +114,7 @@ function reset() {
   metadata = validMetadata(); remaining = 900000; controller = new AbortController(); before = currentCheck;
   claim = { id: "synthetic-pr", headSha: "a".repeat(40), reviewRequestVersion: 3, status: "reviewing" };
   paused = false; remote = { headSha: "a".repeat(40), baseSha: "b".repeat(40) };
-  generationBody = undefined;
+  generationBody = undefined; revisionFailure = undefined;
 }
 function prepared() {
   const result = prepareReviewInput({ provider: "github", headSha: "a".repeat(40), baseSha: "b".repeat(40),
@@ -129,16 +137,23 @@ async function refusal(reason: CapacityRefusalReason, edit?: (params: AiCreatePa
   const p = prepared(), params = request(p); edit?.(params);
   let caught: unknown;
   try { await executeCoveredReview(params, p.coverage, "template", req => createAiMessage(req, "synthetic")); } catch (error) { caught = error; }
-  assert.ok(caught instanceof CapacityAdmissionError, String(caught));
+  assert.ok(caught instanceof CapacityAdmissionError, `${reason}/${mode}: ${String(caught)}`);
   assert.equal(caught.receipt.reason, reason);
   const incidentCount = sentryEvents.length;
-  reportBackgroundFailure(caught, { stage: "generation", signal: controller.signal });
+  reportBackgroundFailure(caught, { stage: "generation", cancelled: isReviewCancelled(params.completeReviewAdmission?.window) });
   const actionable = ["metadata-unavailable", "count-unavailable", "invalid-count", "pricing-unavailable", "final-check-failed", "execution-window"].includes(reason);
   const expected = controller.signal.aborted || (!!org.anthropicApiKey && [401, 402, 403, 429].includes(providerStatus ?? 0));
   assert.equal(sentryEvents.length - incidentCount, actionable && !expected ? 1 : 0, reason);
   if (actionable && !expected) {
     assert.equal(sentryEvents.at(-1)?.tags?.failure_code, `capacity_${reason}`);
     assert.equal(sentryEvents.at(-1)?.tags?.failure_stage, "preparation");
+    if (pricingFailure || organizationFailure || mode === "final-check-failure") {
+      assert.equal(caught.keyOwner, "unknown");
+      assert.equal(sentryEvents.at(-1)?.contexts?.background_failure?.keyOwner, "unknown");
+      assert.equal(sentryEvents.at(-1)?.tags?.provider, "unknown");
+      assert.equal(sentryEvents.at(-1)?.tags?.failure_owner, "unknown");
+      assert.equal(caught.details.status, 429);
+    }
     assert.ok(!JSON.stringify(sentryEvents.at(-1)).includes("private"));
   }
   assert.equal(caught.receipt.primaryDispatch, "not-started");
@@ -163,6 +178,13 @@ async function refusal(reason: CapacityRefusalReason, edit?: (params: AiCreatePa
     await Bun.write(`${process.env.REVIEW_TEST_EVIDENCE_DIR}/capacity-refusal.html`, '<!doctype html><meta charset="utf-8"><title>Synthetic capacity refusal</title>' + Bun.markdown.html(body));
   }
 }
+
+for (const key of ["", "synthetic-byok"]) {
+  reset(); org.anthropicApiKey = key;
+  pricingFailure = Object.assign(new Error("private pricing response"), { status: 429 });
+  try { await refusal("pricing-unavailable"); } finally { pricingFailure = undefined; }
+}
+org.anthropicApiKey = "synthetic-byok";
 
 reset();
 const p = prepared(), params = request(p);
@@ -214,6 +236,20 @@ for (const operation of ["metadata", "count"]) {
   }
 }
 providerStatus = undefined; org.anthropicApiKey = "synthetic-byok";
+for (const key of ["", "synthetic-byok"]) {
+  reset(); org.anthropicApiKey = key;
+  const dependencyError = Object.assign(new Error("private dependency response"), { status: 429 });
+  organizationFailure = dependencyError;
+  try { await refusal("final-check-failed"); } finally { organizationFailure = undefined; }
+  reset(); mode = "final-check-failure";
+  revisionFailure = new GithubRateLimitError(429, null);
+  await refusal("final-check-failed");
+  reset();
+  before = async () => { organizationFailure = dependencyError; return null; };
+  try { await refusal("final-check-failed"); } finally { organizationFailure = undefined; }
+}
+org.anthropicApiKey = "synthetic-byok";
+
 reset(); endpoint = "https://gateway.invalid"; await refusal("unsupported-route"); assert.equal(calls.length, 0);
 for (const edit of [
   () => { metadata.id = "canonical-alias"; },

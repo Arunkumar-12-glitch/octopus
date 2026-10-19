@@ -3,7 +3,7 @@ import { cleanupForgejoConnectorRequests } from "./forgejo-connector";
 import type { PgBoss } from "pg-boss";
 import { sendWelcomeEmail } from "./emails/welcome";
 import { processReview } from "./reviewer";
-import { createReviewExecutionWindow } from "./review-capacity";
+import { createReviewExecutionWindow, isReviewCancelled } from "./review-capacity";
 import {
   handleLargeReviewResult,
   type LargeReviewResultJob,
@@ -81,11 +81,12 @@ export async function registerWorkers(boss: PgBoss, config: QueueConfig): Promis
     async (jobs) => {
       for (const job of jobs) {
         console.log(`[queue] Processing review for PR ${job.data.pullRequestId}`);
+        const executionWindow = createReviewExecutionWindow(job);
         try {
-          await processReview(job.data.pullRequestId, createReviewExecutionWindow(job), job.retryCount);
+          await processReview(job.data.pullRequestId, executionWindow, job.retryCount);
         } catch (err) {
           reportBackgroundFailure(err, { stage: "review", pullRequestId: job.data.pullRequestId,
-            attemptId: job.id, signal: job.signal, retry: { retryCount: job.retryCount, retryLimit: job.retryLimit } });
+            attemptId: job.id, cancelled: isReviewCancelled(executionWindow), retry: { retryCount: job.retryCount, retryLimit: job.retryLimit } });
           console.error(`[queue] Review failed for PR ${job.data.pullRequestId} (job ${job.id}):`, err);
           throw err;
         }

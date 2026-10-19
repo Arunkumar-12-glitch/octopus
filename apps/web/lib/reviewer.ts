@@ -58,7 +58,7 @@ import { getGithubAppConfig } from "@/lib/github-app-config";
 import { parseOctopusIgnore, detectBadCommits } from "@/lib/octopus-ignore";
 import { buildGeneratedMatcher } from "@/lib/generated-files";
 import { MAX_DIFF_CHARS } from "@/lib/diff-truncate";
-import { completeReviewCandidate, reviewCandidateSha256, assertReviewProcessingActive, ReviewProcessingExpiredError, type CompleteReviewAdmission, type ReviewExecutionWindow } from "@/lib/review-capacity";
+import { completeReviewCandidate, reviewCandidateSha256, assertReviewProcessingActive, isReviewCancelled, ReviewProcessingExpiredError, type CompleteReviewAdmission, type ReviewExecutionWindow } from "@/lib/review-capacity";
 import { confirmCompleteReviewCurrent } from "@/lib/review-capacity-current";
 import { prepareReviewInput, applyReviewCoverage, coverageSummary, reviewCheckResult, reviewAssessmentComplete, type ReviewInput, type ReviewCoverage } from "@/lib/review-coverage";
 import { prepareReviewComment } from "@/lib/review-comment-context";
@@ -2588,6 +2588,7 @@ async function processReviewInternal(pullRequestId: string, executionWindow?: Re
     console.log(`[reviewer] Review completed for PR #${pr.number}`);
   } catch (err) {
     const reportingError = err;
+    const cancelled = isReviewCancelled(executionWindow);
     if (adaptiveProcessingWindow
       && (adaptiveProcessingWindow.signal.aborted || adaptiveProcessingWindow.remainingMs() <= 0)) {
       err = new ReviewProcessingExpiredError();
@@ -2662,7 +2663,7 @@ async function processReviewInternal(pullRequestId: string, executionWindow?: Re
       reportBackgroundFailure(reportingError, { stage: failureStage,
         attemptId: failureStage === "indexing" ? failureIndexAttemptId : failureAttemptId,
         repositoryId: repo.id, pullRequestId: pr.id, headSha: pr.headSha, requestVersion: pr.reviewRequestVersion,
-        retryCount, signal: executionWindow?.signal });
+        retryCount, cancelled });
     }
     if (!failedUpdate?.count) return;
 

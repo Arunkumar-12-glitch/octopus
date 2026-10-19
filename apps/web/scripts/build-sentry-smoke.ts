@@ -1,3 +1,4 @@
+/// <reference types="bun-types" />
 const result = await Bun.build({
   entrypoints: [`${import.meta.dir}/sentry-smoke.ts`],
   target: "node",

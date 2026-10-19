@@ -8,13 +8,14 @@ import type { AiCreateParams } from "./index";
 import { CACHE_BREAKPOINT } from "./system-cache";
 import { stripLoneSurrogates } from "./sanitize";
 import { anthropicCountProjection, type AnthropicRequest } from "./anthropic-request";
+import { AiProviderFailure, type KeyOwner } from "../provider-failure";
 
 type CapacityClient = Pick<Anthropic, "baseURL" | "models" | "messages">;
 const positiveInteger = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) > 0;
 
 /** Digest-only, per-attempt evidence. Metadata and count use the generation client's exact account route. */
 export async function admitAnthropicReview(
-  params: AiCreateParams, body: AnthropicRequest, client: CapacityClient,
+  params: AiCreateParams, body: AnthropicRequest, client: CapacityClient, keyOwner: KeyOwner = "unknown",
 ): Promise<{ receipt: CapacityAdmissionReceipt; dispatchTimeout: () => number }> {
   const admission = params.completeReviewAdmission!;
   const receipt = capacityReceipt(admission, params.model);
@@ -47,7 +48,10 @@ export async function admitAnthropicReview(
   let metadata: ModelInfo;
   try {
     metadata = await preflight(policy.metadataTimeoutMs, signal => client.models.retrieve(params.model, {}, { signal, timeout: policy.metadataTimeoutMs, maxRetries: 0 }));
-  } catch (error) { return reject(admission.window.signal.aborted ? "execution-window" : "metadata-unavailable", error); }
+  } catch (error) {
+    return reject(admission.window.signal.aborted ? "execution-window" : "metadata-unavailable",
+      new AiProviderFailure(error, "anthropic", params.model, keyOwner));
+  }
   const metadataMonotonic = performance.now();
   if (!metadata || typeof metadata.id !== "string") return reject("unsupported-capability");
   receipt.canonicalModel = metadata.id;
@@ -64,7 +68,10 @@ export async function admitAnthropicReview(
   let counted: { input_tokens: number; _request_id?: string | null };
   try {
     counted = await preflight(policy.countTimeoutMs, signal => client.messages.countTokens(countBody, { signal, timeout: policy.countTimeoutMs, maxRetries: 0 }));
-  } catch (error) { return reject(admission.window.signal.aborted ? "execution-window" : "count-unavailable", error); }
+  } catch (error) {
+    return reject(admission.window.signal.aborted ? "execution-window" : "count-unavailable",
+      new AiProviderFailure(error, "anthropic", params.model, keyOwner));
+  }
   const countMonotonic = performance.now();
   if (!counted || !Number.isSafeInteger(counted.input_tokens) || counted.input_tokens < 0) return reject("invalid-count");
   receipt.count = { requestSha256: sha256(JSON.stringify(countBody)), inputTokens: counted.input_tokens,

@@ -1,6 +1,6 @@
 import { sha256, prepareReviewInput, type ReviewCoverage, type ReviewInput } from "./review-coverage";
 import { DIFF_CHAR_CAP, MAX_FETCH_DIFF_CHARS } from "./diff-truncate";
-import { safeErrorDetails, type KeyOwner } from "./provider-failure";
+import { AiProviderFailure, safeErrorDetails, type KeyOwner } from "./provider-failure";
 
 /** Product admission limits, not a claim about a particular review's fit or invoice. */
 export const COMPLETE_REVIEW_POLICY = Object.freeze({
@@ -32,6 +32,10 @@ export function createReviewExecutionWindow(
   const remaining = Math.max(0, deadlineEpochMs - entered);
   const deadline = clock.monotonic() + remaining;
   return { jobId: job.id, deadlineEpochMs, signal: job.signal, remainingMs: () => Math.max(0, deadline - clock.monotonic()) };
+}
+
+export function isReviewCancelled(window?: ReviewExecutionWindow): boolean {
+  return !!window?.signal.aborted && window.signal.reason?.name !== "TimeoutError" && window.remainingMs() > 0;
 }
 
 /** Also bounds non-cancellable read-only DB lookups; they may finish after this waiter rejects. */
@@ -137,11 +141,14 @@ export function capacityReceipt(admission: CompleteReviewAdmission, model: strin
 
 export class CapacityAdmissionError extends Error {
   readonly details: ReturnType<typeof safeErrorDetails>;
-  keyOwner: KeyOwner = "unknown";
+  readonly keyOwner: KeyOwner;
+  readonly provider: AiProviderFailure["provider"] | undefined;
   constructor(public readonly receipt: CapacityAdmissionReceipt, error?: unknown) {
     super(`Complete review admission refused: ${receipt.reason ?? "final-check-failed"}`);
     this.name = "CapacityAdmissionError";
-    this.details = safeErrorDetails(error);
+    this.details = error instanceof AiProviderFailure ? error.details : safeErrorDetails(error);
+    this.keyOwner = error instanceof AiProviderFailure ? error.keyOwner : "unknown";
+    this.provider = error instanceof AiProviderFailure ? error.provider : undefined;
   }
 }
 

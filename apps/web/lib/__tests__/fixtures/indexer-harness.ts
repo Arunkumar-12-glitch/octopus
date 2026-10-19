@@ -7,6 +7,8 @@ let details: { default_branch: string } | null = { default_branch: "main" };
 let writes = 0;
 const embedded: string[][] = [];
 let afterUpsert: (() => void) | undefined;
+let beforeEmbedding: (() => void) | undefined;
+let afterEmbedding: (() => void) | undefined;
 let invalidEmbeddings = false;
 let suppliedToken: string | undefined = undefined;
 let ignoreContent: string | null = null;
@@ -41,13 +43,14 @@ mock.module("@/lib/forgejo", () => ({
   },
 }));
 mock.module("@/lib/qdrant", () => ({
-  ensureCollection: async () => {},
+  ensureCollection: async () => { beforeEmbedding?.(); },
   deleteRepoFileChunks: async () => {},
   upsertChunks: async (_points: unknown[], owner: { repoId: string; indexAttemptId: string }) => { assert.equal(owner.indexAttemptId, "attempt-1"); writes++; afterUpsert?.(); },
 }));
 mock.module("@/lib/embeddings", () => ({
   createEmbeddings: async (texts: string[]) => {
     embedded.push(texts);
+    afterEmbedding?.();
     return invalidEmbeddings ? [] : texts.map(() => [0.1]);
   },
 }));
@@ -197,3 +200,46 @@ assert.ok(tokenResult.totalVectors > 0);
 assert.ok(!requests.some(url => url.endsWith("/git/blobs/ignored")));
 ignoreContent = null;
 await assert.rejects(() => indexRepository({ repoId: "repo-1", indexAttemptId: "attempt-1" }, "acme/new", "main", 0, undefined, undefined, "github", "org-1", suppliedToken), /could not read .octopusignore/);
+
+const sentryEvents: unknown[] = [];
+mock.module("@sentry/nextjs", () => ({ captureEvent: (event: unknown) => { sentryEvents.push(event); return "e".repeat(32); } }));
+const indexRow = { indexStatus: "indexing", indexAttemptId: "attempt-1" };
+mock.module("@octopus/db", () => ({ prisma: { repository: {
+  findUniqueOrThrow: async () => ({ ...indexRow }),
+  updateMany: async ({ data }: { data: { indexStatus: string } }) => { Object.assign(indexRow, data); return { count: 1 }; },
+} } }));
+const { runRepositoryIndex, isIndexingCancelled } = await import("../../repository-index-completion");
+const { reportBackgroundFailure } = await import("../../background-failure");
+for (const boundary of ["before-embedding", "after-embedding"]) {
+  for (const timeout of [false, true]) {
+    reset(); suppliedToken = undefined; indexRow.indexStatus = "indexing";
+    responses.set("/git/trees/main?recursive=1", [200, { tree: [{ path: "index.ts", type: "blob", sha: "good", size: 35 }] }]);
+    responses.set("/git/blobs/good", [200, { encoding: "base64", content: Buffer.from("export const good = 1;").toString("base64") }]);
+    const controller = new AbortController();
+    const abort = () => timeout ? controller.abort(new DOMException("Deadline", "TimeoutError")) : controller.abort();
+    beforeEmbedding = boundary === "before-embedding" ? abort : undefined;
+    afterEmbedding = boundary === "after-embedding" ? abort : undefined;
+    let rawError: unknown;
+    let failure: unknown;
+    try {
+      await runRepositoryIndex("repo-1", "attempt-1", () => indexRepository(
+        { repoId: "repo-1", indexAttemptId: "attempt-1" }, "acme/new", "main", 123, undefined, controller.signal,
+      ).catch(error => { rawError = error; throw error; }), controller.signal);
+    } catch (error) { failure = error; }
+    assert.ok(rawError instanceof Error);
+    assert.equal(rawError.message, "Indexing cancelled");
+    assert.equal(failure, controller.signal.reason);
+    assert.equal(indexRow.indexStatus, timeout ? "failed" : "pending");
+    assert.equal(writes, 0);
+    const before = sentryEvents.length;
+    const context = { stage: "indexing" as const, attemptId: "attempt-1", cancelled: isIndexingCancelled(controller.signal) };
+    reportBackgroundFailure(failure, { ...context, retry: { retryCount: 1, retryLimit: 2 } });
+    assert.equal(sentryEvents.length, before);
+    reportBackgroundFailure(failure, { ...context, retry: { retryCount: 2, retryLimit: 2 } });
+    assert.equal(sentryEvents.length, before + Number(timeout));
+    reportBackgroundFailure(failure, context);
+    assert.equal(sentryEvents.length, before + Number(timeout));
+  }
+}
+beforeEmbedding = afterEmbedding = undefined;
+console.log("PASS actual indexer cancellation messages preserve timeout and terminal reporting");

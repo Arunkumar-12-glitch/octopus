@@ -39,7 +39,21 @@ const log = console.error; console.error = () => {};
 try {
   await assert.rejects(() => callbacks.get("process-review")!([job]));
   assert.equal(events.length, 1);
-  job.signal = new AbortController().signal;
+  job.startedOn = new Date(Date.now() - 901000);
+  assert.equal(job.signal.reason.name, "AbortError");
   await assert.rejects(() => callbacks.get("process-review")!([job]));
   assert.equal(events.length, 2);
+  reviewError = new Error("Another expired attempt");
+  job.retryCount = 1;
+  await assert.rejects(() => callbacks.get("process-review")!([job]));
+  assert.equal(events.length, 2);
+  job.retryCount = 2;
+  job.startedOn = new Date(NaN);
+  await assert.rejects(() => callbacks.get("process-review")!([job]));
+  assert.equal(events.length, 3, "missing deadline evidence must not claim cancellation");
+  reviewError = new Error("Uncancelled failure");
+  job.startedOn = new Date();
+  job.signal = new AbortController().signal;
+  await assert.rejects(() => callbacks.get("process-review")!([job]));
+  assert.equal(events.length, 4);
 } finally { console.error = log; }

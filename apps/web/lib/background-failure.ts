@@ -13,7 +13,7 @@ export type FailureContext = {
   requestVersion?: number;
   retry?: RetryState;
   retryCount?: number;
-  signal?: AbortSignal;
+  cancelled?: boolean;
   synthetic?: boolean;
 };
 const reported = new WeakSet<object>();
@@ -23,7 +23,7 @@ const identifier = (value: string | null | undefined) => value && /^[a-zA-Z0-9_-
 export function reportBackgroundFailure(error: unknown, context: FailureContext): string | undefined {
   try {
     if (context.retry && context.retry.retryCount < context.retry.retryLimit) return;
-    if (context.signal?.aborted && context.signal.reason?.name !== "TimeoutError") return;
+    if (context.cancelled) return;
     if (error && typeof error === "object" && reported.has(error)) return;
     const providerFailure = error instanceof AiProviderFailure ? error : undefined;
     const capacityFailure = error instanceof CapacityAdmissionError ? error : undefined;
@@ -44,7 +44,7 @@ export function reportBackgroundFailure(error: unknown, context: FailureContext)
     const ownership = keyOwner === "platform" && status && ([401, 402, 403, 429].includes(status) || status >= 500)
       ? "platform" : "unknown";
     const code = capacityFailure ? `capacity_${capacityFailure.receipt.reason ?? "final-check-failed"}` : details.code ?? (status ? `http_${status}` : "unclassified");
-    const provider = providerFailure?.provider ?? (capacityFailure ? "anthropic" : "unknown");
+    const provider = providerFailure?.provider ?? capacityFailure?.provider ?? "unknown";
     const stage = capacityFailure ? "preparation" : providerFailure && context.stage === "review" ? "generation" : context.stage;
     const eventId = Sentry.captureEvent({
       level: "error",
