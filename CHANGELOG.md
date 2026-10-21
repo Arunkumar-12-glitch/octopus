@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.3] - 2026-10-21
+
+### Fixed
+
+- Unreachable Forgejo instances now return a connection error without escaping the request handler.
+
 ## [1.3.2] - 2026-10-19
 
 ### Fixed
